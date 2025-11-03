@@ -32,7 +32,6 @@ def parse_asan(log_text: str):
         "summary": None
     }
 
-    # Header and access info
     if (h := header_re.search(log_text)):
         parsed["error_type"] = h.group("error_type")
         parsed["address"] = h.group("address")
@@ -118,7 +117,6 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], is_li
                         stderr = result.stderr.decode(errors='replace')
                         
                         if "AddressSanitizer" in stderr:
-                            print(stderr)
                             parsed_asan = parse_asan(stderr)
                             functions = get_source_functions(parsed_asan)
                             if functions:
@@ -130,7 +128,6 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], is_li
     
     return {tool: list(sigs) for tool, sigs in unique_bugs.items()}
 
-# --- Example usage ---
 if __name__ == "__main__":
     import argparse
     import os

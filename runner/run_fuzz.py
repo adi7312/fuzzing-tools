@@ -2,6 +2,8 @@ import argparse
 import os
 import subprocess
 import multiprocessing
+from elftools.elf.elffile import ELFFile
+import yaml
 
 
 def abspath_if_not_none(path):
@@ -104,6 +106,32 @@ def launch_libfuzzer(core_id, input_dir, cluster_dir, stats_file, target, timeou
     print(f"[+] Launching {session_name} on core {core_id} -> {target}")
     print(cmd)
     subprocess.run(cmd, shell=True, check=False)
+
+def write_manifset(output_dir):
+
+    return
+
+def read_manifest(config_path):
+    
+    return
+
+def is_asan(binary_path):
+    try:
+        with open(binary_path, 'rb') as f:
+            elffile = ELFFile(f)
+            for section in elffile.iter_sections():
+                if section.name in ('.symtab', '.dynsym'):
+                    for sym in section.iter_symbols():
+                        if sym.name == '__asan_init':
+                            return True
+    except FileNotFoundError:
+        print(f"Warning: Binary '{binary_path}' not found during ASAN check.")
+        return False
+    except Exception as e:
+        print(f"Warning: Could not read ELF symbols from '{binary_path}'. Error: {e}")
+        return False
+    return False
+
 
 
 from time import sleep
