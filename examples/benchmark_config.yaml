@@ -1,0 +1,29 @@
+target_name: "libxml2"
+input_corpora: "/path/to/seed_corpus"
+timeout: "12h"  # Duration for each fuzzer (e.g., AFL++ will run for 12h, then Honggfuzz for 12h, etc.)
+campaigns: 10   # Number of fuzzing campaigns per fuzzer
+dict: "/path/to/libxml2.dict"  # Optional fuzzing dictionary
+
+# Coverage and oracle binaries used for analysis
+coverage_binary: "/path/to/coverage_binary"  # For coverage analysis
+oracle_binary: "/path/to/oracle_asan_binary" # For validating bugs
+
+# Fuzzers configuration
+# Order matters - fuzzers will be scheduled in this sequence
+fuzzers:
+  aflpp:  # Will run first
+    binaries:  # List of binaries (normal and ASAN)
+      - "/path/to/aflpp_fuzz"        # Normal binary
+      - "/path/to/aflpp_fuzz_ASAN"   # ASAN binary
+    concolic: "symcc"  # Optional concolic execution
+    concolic_bin: "/path/to/symcc_bin"  # Required if concolic is specified
+
+  honggfuzz:  # Will run second (after AFL++ finishes)
+    binaries:
+      - "/path/to/honggfuzz_fuzz"
+      - "/path/to/honggfuzz_fuzz_ASAN"
+
+  libfuzzer:  # Will run last
+    binaries:
+      - "/path/to/libfuzzer_fuzz"
+      - "/path/to/libfuzzer_fuzz_ASAN"

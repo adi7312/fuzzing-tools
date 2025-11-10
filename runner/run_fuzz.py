@@ -45,7 +45,7 @@ def launch_honggfuzz(core_id, input_dir, cluster_dir, crash_dir, stats_file, tar
         f"{workspace_arg} "
         f"--crashdir \"{crash_dir}\" "
         f"--statsfile \"{stats_file}\" "
-        f"{dict_args}"
+        f"{dict_args} "
         f"-V "
         f"-U "
         f"{sanitizers} "
@@ -136,6 +136,115 @@ def is_asan(binary_path):
 
 from time import sleep
 
+def run_fuzzing_session(
+    fuzzer_type,
+    target,
+    asan_target,
+    input_dir,
+    output_dir,
+    timeout="12h",
+    clusters=10,
+    jobs=2,
+    start_core=0,
+    dictionary=None,
+    concolic=None,
+    concolic_bin=None,
+    no_setup=False
+):
+    """Function equivalent to main() but takes parameters directly."""
+    setup_system(no_setup)
+
+    target1 = target
+    target2 = asan_target if asan_target else target1
+
+    total_cores = multiprocessing.cpu_count()
+    core_id = start_core
+    is_concolic = concolic in ['symcc', 'fuzzolic']
+    
+    if (is_concolic and not concolic_bin):
+        raise Exception("Concolic execution enabled but no binary was provided")
+    
+    for cluster in range(1, clusters + 1):
+        for job in range(1, jobs + 1):
+            fuzz_name = f"fuzz{job:02d}"
+            target = target1 if job % 2 != 0 else target2
+            assigned_core = core_id % total_cores
+
+            if fuzzer_type == 'honggfuzz':
+                cluster_top_dir = os.path.join(output_dir, f"c{cluster}")
+                cluster_dir = os.path.join(cluster_top_dir, fuzz_name)
+                crash_dir = os.path.join(cluster_dir, "crashes")
+                make_dir(crash_dir)
+                stats_file = os.path.join(cluster_dir, f"stats_{cluster}_{job}.txt")
+                session_name = f"hf_c{cluster}_{fuzz_name}"
+                launch_honggfuzz(
+                    core_id=assigned_core,
+                    input_dir=input_dir,
+                    cluster_dir=cluster_dir,
+                    crash_dir=crash_dir,
+                    stats_file=stats_file,
+                    target=target,
+                    timeout=timeout,
+                    session_name=session_name,
+                    dictionary=dictionary,
+                    workspace=cluster_top_dir
+                )
+                core_id += 1
+            elif fuzzer_type == 'libfuzzer':
+                cluster_dir = os.path.join(output_dir, f"c{cluster}", fuzz_name)
+                corpus_dir = os.path.join(input_dir, f"c{cluster}", fuzz_name)
+                make_dir(cluster_dir)
+                make_dir(corpus_dir)
+                stats_file = os.path.join(cluster_dir, "fuzz.report")
+                session_name = f"lf_c{cluster}_{fuzz_name}"
+                launch_libfuzzer(
+                    core_id=assigned_core,
+                    input_dir=corpus_dir,
+                    cluster_dir=cluster_dir,
+                    stats_file=stats_file,
+                    target=target,
+                    timeout=timeout,
+                    session_name=session_name,
+                    dictionary=dictionary
+                )
+                core_id += 1
+            elif fuzzer_type in ['afl', 'aflpp']:
+                is_aflpp = fuzzer_type == 'aflpp'
+                output_dir_cluster = os.path.join(output_dir, f"c{cluster}")
+                make_dir(output_dir_cluster)
+                session_name = f"afl_c{cluster}_{fuzz_name}"
+                is_main = (job == 1)
+                launch_afl(
+                    core_id=assigned_core,
+                    input_dir=input_dir,
+                    output_dir=output_dir_cluster,
+                    target=target,
+                    timeout=timeout,
+                    session_name=session_name,
+                    dictionary=dictionary,
+                    is_main=is_main,
+                    is_aflpp=is_aflpp,
+                )
+                core_id += 1
+            if concolic == 'symcc' and fuzzer_type in ['afl','aflpp'] and job == jobs:
+                sleep(1)
+                session_name = f"afl_c{cluster}_symcc"
+                output_dir_cluster = os.path.join(output_dir, f"c{cluster}")
+                launch_symcc(
+                    core_id=core_id,
+                    fuzzer_id=f"fuzz{job:02d}",
+                    concolic_bin=concolic_bin,
+                    session_name=session_name,
+                    timeout=timeout,
+                    output_dir=output_dir_cluster
+                )
+                core_id += 1
+
+    print("\n[*] All fuzzing jobs launched in screen sessions.")
+    print("    List sessions with:  screen -ls")
+    print("    Attach with:         screen -r <session_name>")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Automated fuzzer launcher with multi-core support.")
     parser.add_argument("--fuzzer", required=True, choices=['honggfuzz', 'afl', 'aflpp', 'libfuzzer'], help="Fuzzer to use.")
@@ -153,96 +262,21 @@ def main():
     parser.add_argument("--concolic-bin", help="Path to symbolicaly instrumented binary")
 
     args = parser.parse_args()
-    setup_system(args.no_setup)
-
-    target1 = args.target
-    target2 = args.asan_target if args.asan_target else target1
-
-    total_cores = multiprocessing.cpu_count()
-    core_id = args.start_core
-    is_concolic = args.concolic in ['symcc', 'fuzzolic']
-    if (is_concolic and not args.concolic_bin):
-        raise Exception("Concolic execution enabled but no binary was provided")
-    for cluster in range(1, args.clusters + 1):
-        for job in range(1, args.jobs + 1):
-            fuzz_name = f"fuzz{job:02d}"
-            target = target1 if job % 2 != 0 else target2
-            assigned_core = core_id % total_cores
-
-            if args.fuzzer == 'honggfuzz':
-                cluster_top_dir = os.path.join(args.output, f"c{cluster}")
-                cluster_dir = os.path.join(cluster_top_dir, fuzz_name)
-                crash_dir = os.path.join(cluster_dir, "crashes")
-                make_dir(crash_dir)
-                stats_file = os.path.join(cluster_dir, f"stats_{cluster}_{job}.txt")
-                session_name = f"hf_c{cluster}_{fuzz_name}"
-                launch_honggfuzz(
-                    core_id=assigned_core,
-                    input_dir=args.input,
-                    cluster_dir=cluster_dir,
-                    crash_dir=crash_dir,
-                    stats_file=stats_file,
-                    target=target,
-                    timeout=args.timeout,
-                    session_name=session_name,
-                    dictionary=args.dict,
-                    workspace=cluster_top_dir
-                )
-                core_id += 1
-            elif args.fuzzer == 'libfuzzer':
-                cluster_dir = os.path.join(args.output, f"c{cluster}", fuzz_name)
-                corpus_dir = os.path.join(args.input, f"c{cluster}", fuzz_name)
-                make_dir(cluster_dir)
-                make_dir(corpus_dir)
-                stats_file = os.path.join(cluster_dir, "fuzz.report")
-                session_name = f"lf_c{cluster}_{fuzz_name}"
-                launch_libfuzzer(
-                    core_id=assigned_core,
-                    input_dir=corpus_dir,
-                    cluster_dir=cluster_dir,
-                    stats_file=stats_file,
-                    target=target,
-                    timeout=args.timeout,
-                    session_name=session_name,
-                    dictionary=args.dict
-                )
-                core_id += 1
-            elif args.fuzzer == 'afl' or args.fuzzer == 'aflpp':
-                is_aflpp = args.fuzzer == 'aflpp'
-
-                output_dir = os.path.join(args.output, f"c{cluster}")
-                make_dir(output_dir)
-                session_name = f"afl_c{cluster}_{fuzz_name}"
-                is_main = (job == 1)
-                launch_afl(
-                    core_id=assigned_core,
-                    input_dir=args.input,
-                    output_dir=output_dir,
-                    target=target,
-                    timeout=args.timeout,
-                    session_name=session_name,
-                    dictionary=args.dict,
-                    is_main=is_main,
-                    is_aflpp=is_aflpp,
-                )
-                core_id += 1
-            if args.concolic == 'symcc' and args.fuzzer in ['afl','aflpp'] and job == args.jobs:
-                sleep(1)
-                session_name = f"afl_c{cluster}_symcc"
-                output_dir = os.path.join(args.output, f"c{cluster}")
-                launch_symcc(
-                    core_id=core_id,
-                    fuzzer_id=f"fuzz{job:02d}",
-                    concolic_bin=args.concolic_bin,
-                    session_name=session_name,
-                    timeout=args.timeout,
-                    output_dir=output_dir
-                )
-                core_id += 1
-
-    print("\n[*] All fuzzing jobs launched in screen sessions.")
-    print("    List sessions with:  screen -ls")
-    print("    Attach with:         screen -r <session_name>")
+    run_fuzzing_session(
+        fuzzer_type=args.fuzzer,
+        target=args.target,
+        asan_target=args.asan_target,
+        input_dir=args.input,
+        output_dir=args.output,
+        timeout=args.timeout,
+        clusters=args.clusters,
+        jobs=args.jobs,
+        start_core=args.start_core,
+        dictionary=args.dict,
+        concolic=args.concolic,
+        concolic_bin=args.concolic_bin,
+        no_setup=args.no_setup
+    )
 
 
 if __name__ == "__main__":
