@@ -3,7 +3,6 @@ import os
 import subprocess
 import multiprocessing
 from elftools.elf.elffile import ELFFile
-import yaml
 
 
 def abspath_if_not_none(path):
@@ -107,13 +106,6 @@ def launch_libfuzzer(core_id, input_dir, cluster_dir, stats_file, target, timeou
     print(cmd)
     subprocess.run(cmd, shell=True, check=False)
 
-def write_manifset(output_dir):
-
-    return
-
-def read_manifest(config_path):
-    
-    return
 
 def is_asan(binary_path):
     try:
@@ -138,8 +130,7 @@ from time import sleep
 
 def run_fuzzing_session(
     fuzzer_type,
-    target,
-    asan_target,
+    targets,
     input_dir,
     output_dir,
     timeout="12h",
@@ -149,13 +140,8 @@ def run_fuzzing_session(
     dictionary=None,
     concolic=None,
     concolic_bin=None,
-    no_setup=False
 ):
-    """Function equivalent to main() but takes parameters directly."""
-    setup_system(no_setup)
-
-    target1 = target
-    target2 = asan_target if asan_target else target1
+    
 
     total_cores = multiprocessing.cpu_count()
     core_id = start_core
@@ -164,10 +150,17 @@ def run_fuzzing_session(
     if (is_concolic and not concolic_bin):
         raise Exception("Concolic execution enabled but no binary was provided")
     
+    # ensure targets is a list
+    if isinstance(targets, (str, bytes)):
+        targets = [targets]
+    if not targets:
+        raise ValueError("At least one target binary must be provided")
+
     for cluster in range(1, clusters + 1):
         for job in range(1, jobs + 1):
             fuzz_name = f"fuzz{job:02d}"
-            target = target1 if job % 2 != 0 else target2
+            # pick target by cycling through provided binaries
+            target = targets[(job - 1) % len(targets)]
             assigned_core = core_id % total_cores
 
             if fuzzer_type == 'honggfuzz':
@@ -189,7 +182,6 @@ def run_fuzzing_session(
                     dictionary=dictionary,
                     workspace=cluster_top_dir
                 )
-                core_id += 1
             elif fuzzer_type == 'libfuzzer':
                 cluster_dir = os.path.join(output_dir, f"c{cluster}", fuzz_name)
                 corpus_dir = os.path.join(input_dir, f"c{cluster}", fuzz_name)
@@ -207,7 +199,6 @@ def run_fuzzing_session(
                     session_name=session_name,
                     dictionary=dictionary
                 )
-                core_id += 1
             elif fuzzer_type in ['afl', 'aflpp']:
                 is_aflpp = fuzzer_type == 'aflpp'
                 output_dir_cluster = os.path.join(output_dir, f"c{cluster}")
@@ -225,7 +216,7 @@ def run_fuzzing_session(
                     is_main=is_main,
                     is_aflpp=is_aflpp,
                 )
-                core_id += 1
+            core_id += 1
             if concolic == 'symcc' and fuzzer_type in ['afl','aflpp'] and job == jobs:
                 sleep(1)
                 session_name = f"afl_c{cluster}_symcc"
@@ -248,8 +239,7 @@ def run_fuzzing_session(
 def main():
     parser = argparse.ArgumentParser(description="Automated fuzzer launcher with multi-core support.")
     parser.add_argument("--fuzzer", required=True, choices=['honggfuzz', 'afl', 'aflpp', 'libfuzzer'], help="Fuzzer to use.")
-    parser.add_argument("--target", required=True, help="Path to main fuzz target binary.")
-    parser.add_argument("--asan-target", help="Path to ASAN variant binary (optional).")
+    parser.add_argument("--targets", required=True, nargs='+', help="One or more paths to fuzz target binaries. The launcher will cycle through these for jobs.")
     parser.add_argument("--input", required=True, help="Path to input corpus directory.")
     parser.add_argument("--output", required=True, help="Top-level output directory.")
     parser.add_argument("--timeout", default="12h", help="Timeout for each fuzzing job (e.g., 12h, 1d).")
@@ -264,8 +254,7 @@ def main():
     args = parser.parse_args()
     run_fuzzing_session(
         fuzzer_type=args.fuzzer,
-        target=args.target,
-        asan_target=args.asan_target,
+        targets=[os.path.abspath(t) for t in args.targets],
         input_dir=args.input,
         output_dir=args.output,
         timeout=args.timeout,

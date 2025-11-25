@@ -58,10 +58,13 @@ void executeSingleTest(const char* path){
 }
 
 int main(int argc, char* argv[]){
+    if (argc < 2){
+        fprintf(stderr, "Usage: %s <directory/file>",argv[0]);
+    }
     int entryType = getEntryType(argv[1]);
     switch (entryType)
     {
-    case DIR_MODE:
+    case DIR_MODE:{
         DIR* dir = opendir(argv[1]);
         if (dir == NULL){
             fprintf(stderr, "Failed to open handle on a directory: %s",argv[1]);
@@ -71,7 +74,7 @@ int main(int argc, char* argv[]){
         while ((entry = readdir(dir))){
             if (entry->d_type == DT_REG){
                 size_t path_len = strlen(argv[1]) + strlen(entry->d_name) + 2;
-                char *path = malloc(path_len);
+                char *path = (char* )malloc(path_len);
                 if (path == NULL) {
                     fprintf(stderr, "Failed to allocate memory for path\n");
                     closedir(dir);
@@ -84,14 +87,16 @@ int main(int argc, char* argv[]){
         }
         closedir(dir);
         break;
-    case FILE_MODE:
+    }
+    case FILE_MODE: {
         executeSingleTest(argv[1]);
         break;
-    
-    default:
-        fprintf(stderr, "Usage: %s <directory/file>",argv[0]);
-        return 1;
     }
+    default: {
+        return 1;
+        break;
+    }
+}
     return 0;
 
 }

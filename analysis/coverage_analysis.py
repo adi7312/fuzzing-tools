@@ -5,14 +5,11 @@ import os
 import subprocess
 import sys
 import tempfile
-import re
 import json
 import concurrent.futures
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from datetime import datetime
-import time
 import shutil
 from collections import defaultdict
 
@@ -24,7 +21,6 @@ def parse_args():
     parser.add_argument("-o", "--output", default="coverage_analysis", help="Output directory for plots and data.")
     parser.add_argument("-t", "--title", default="Code Coverage Analysis", help="Title for the plots.")
     parser.add_argument("--time-limit", type=int, default=3600*12, help="Time limit in seconds for coverage growth analysis.")
-    parser.add_argument("cmdline", nargs=argparse.REMAINDER, help="Command line for the target application.")
     return parser.parse_args()
 
 def get_coverage(binary_path, corpus_dir):
@@ -36,7 +32,7 @@ def get_coverage(binary_path, corpus_dir):
 
         run_cmd = (binary_path, corpus_dir)
         try:
-            subprocess.run(run_cmd, env=env, check=True, capture_output=True, text=True, timeout=60)
+            subprocess.run(run_cmd, env=env, check=True, capture_output=True, text=True, timeout=3)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
 
@@ -53,7 +49,7 @@ def get_coverage(binary_path, corpus_dir):
 
         cov_cmd = ["llvm-cov", "export", binary_path, f"-instr-profile={profdata_file}", "-summary-only"]
         try:
-            result = subprocess.run(cov_cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(cov_cmd, check=True, capture_output=True, text=True,timeout=3)
             cov_data = json.loads(result.stdout)
             branches_summary = cov_data['data'][0]['totals']['branches']
             return branches_summary['covered']
@@ -268,7 +264,7 @@ def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
             if not corpus_path and os.path.isdir(fuzzer_instance_path):
                 if any(os.path.isfile(os.path.join(fuzzer_instance_path, f)) for f in os.listdir(fuzzer_instance_path)):
                     corpus_path = fuzzer_instance_path
-
+            
             if corpus_path:
                 fuzzer_id = fuzzer_instance_dir.replace('fuzzer', '')
                 key = f"{fuzzer_name}_{fuzzer_id}"
@@ -276,6 +272,8 @@ def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
                 if key not in coverage_data:
                     coverage_data[key] = []
                 coverage_data[key].append(coverage)
+            else:
+                print(f"  [!] No corpus found for instance {fuzzer_instance_dir} in {campaign_path}")
 
     return coverage_data
 
@@ -293,23 +291,35 @@ def plot_coverage_growth(data, output_dir, plot_title):
         if not plot_data:
             print(f"  [!] No data to plot for {build_type} builds.")
             return
-
         plt.figure(figsize=(12, 8))
+        import matplotlib.ticker as mticker
         sorted_fuzzer_names = sorted(plot_data.keys())
+        xmax = 0.0
         for fuzzer_name in sorted_fuzzer_names:
             coverage_data = plot_data[fuzzer_name]
             if not coverage_data:
                 continue
             df = pd.DataFrame(list(coverage_data.items()), columns=['Time', 'Coverage']).sort_values(by='Time')
-            plt.plot(df['Time'], df['Coverage'], linestyle='-', label=fuzzer_name.replace(f' ({build_type})', ''))
+            # convert seconds to hours for x-axis
+            df['TimeHours'] = df['Time'] / 3600.0
+            plt.plot(df['TimeHours'], df['Coverage'], linestyle='-', label=fuzzer_name.replace(f' ({build_type})', ''))
+            xmax = max(xmax, df['TimeHours'].max())
 
         plt.title(f"{plot_title} - {build_type}")
-        plt.xlabel("Time (seconds)")
+        plt.xlabel("Time (hours)")
         plt.ylabel("Average Branch Coverage")
         plt.grid(True)
         plt.legend()
+
+        # start x-axis at 15 minutes (0.25 hours) if the data extends beyond that,
+        # otherwise keep the x-axis starting at 0 to avoid empty plots.
+        xmin = 0.25 if xmax > 0.25 else 0.0
+        if xmax > 0:
+            plt.xlim(left=xmin, right=xmax)
+        ax = plt.gca()
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
         plt.tight_layout()
-        
+
         plot_path = os.path.join(output_dir, f"coverage_growth_{build_type.lower()}.png")
         plt.savefig(plot_path)
         print(f"  [+] Coverage growth plot saved to {plot_path}")

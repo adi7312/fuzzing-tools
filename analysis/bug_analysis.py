@@ -1,20 +1,26 @@
-import re
 import json
 from typing import List, Dict, Any
 import hashlib
 import subprocess
 import os
+import matplotlib.pyplot as plt
+from collections import defaultdict
+from statistics import mean 
 
+from analysis.parse.parse_asan import parse_asan
+from analysis.parse.parse_afl import get_start_time as get_start_time_afl
+from analysis.parse.parse_hfuzz import get_start_time as get_start_time_hfuzz
 
 class Bug:
     def __init__(self, signature: str, error_type: str):
         self.signature = signature
         self.error_type = error_type
-        self.found_in = set()
+        self.found_in = {} # fuzzer_id : tte
         self.stack = []
 
-    def add_finder(self, fuzzer_id: str):
-        self.found_in.add(fuzzer_id)
+    def add_finder(self, fuzzer_id: str, tte: int):
+        if not self.found_in.get(fuzzer_id):
+            self.found_in[fuzzer_id] = tte
 
     def set_stack_if_missing(self, function_stack: List[str]):
         if not self.stack and function_stack:
@@ -25,13 +31,14 @@ class Bug:
 
 
 class BugBucket:
-    def __init__(self):
+    def __init__(self,start_time):
         self._bugs: Dict[str, Bug] = {}
+        self.start_time = start_time
 
-    def add(self, signature: str, error_type: str, fuzzer_id: str):
+    def add(self, signature: str, error_type: str, fuzzer_id: str, tte: int):
         if signature not in self._bugs:
             self._bugs[signature] = Bug(signature, error_type)
-        self._bugs[signature].add_finder(fuzzer_id)
+        self._bugs[signature].add_finder(fuzzer_id, tte)
         return self._bugs[signature]
 
     def signatures(self):
@@ -41,33 +48,20 @@ class BugBucket:
         return self._bugs.items()
 
 def _extract_fuzzer_id(crash_file_path: str, fuzz_dir: str) -> str:
-    """Extract a compact fuzzer instance identifier from a crash file path.
-
-    Examples:
-      /.../out/c1/fuzz01/crashes/0001 -> 'c1/fuzz01'
-      /.../out/fuzz01/crash -> 'fuzz01'
-      fallback to filename if structure is unknown
-    """
     rel = os.path.relpath(os.path.dirname(crash_file_path), fuzz_dir)
     parts = rel.split(os.sep)
     for i, p in enumerate(parts):
         if p.startswith('c'):
-            # campaign directory, check next for fuzz instance
             if i + 1 < len(parts) and parts[i + 1].startswith('fuzz'):
                 return f"{p}/{parts[i+1]}"
             return p
     for p in parts:
         if p.startswith('fuzz'):
             return p
-    # fallback
     return os.path.basename(crash_file_path)
 
 
 def _count_expected_fuzzers(fuzz_dir: str) -> int:
-    """Estimate how many fuzzer instances ran for this tool by scanning c*/fuzz* dirs.
-
-    Falls back to counting top-level 'fuzz*' dirs or files if campaign dirs are missing.
-    """
     try:
         entries = os.listdir(fuzz_dir)
     except FileNotFoundError:
@@ -81,12 +75,10 @@ def _count_expected_fuzzers(fuzz_dir: str) -> int:
             total += len([d for d in os.listdir(p) if os.path.isdir(os.path.join(p, d)) and d.startswith('fuzz')])
         return total
 
-    # no campaign dirs, count fuzz* dirs at top level
     fuzz_dirs = len([d for d in entries if os.path.isdir(os.path.join(fuzz_dir, d)) and d.startswith('fuzz')])
     if fuzz_dirs:
         return fuzz_dirs
 
-    # as a last resort, count files existing in the directory
     return len([f for f in entries if os.path.isfile(os.path.join(fuzz_dir, f))])
 
 
@@ -112,12 +104,11 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
                 result = subprocess.run([asan_binary_path], stdin=fh, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=3)
 
         stderr = result.stderr.decode(errors='replace')
+        tte = os.path.getmtime(crash_file_path)
         if "AddressSanitizer" in stderr:
             parsed_asan = parse_asan(stderr)
-            print(parsed_asan)
             functions = get_source_functions(parsed_asan)
             error_type = get_error_type(parsed_asan)
-            print(f"[DEBUG] Function: {functions[0][0]} at line {functions[0][1]}")
             if functions and error_type:
                 signature = get_stack_signature(functions, error_type)
                 fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
@@ -125,7 +116,8 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
                     'signature': signature,
                     'error_type': error_type,
                     'fuzzer_id': fuzzer_id,
-                    'functions': functions
+                    'functions': functions,
+                    'tte':int(tte)
                 }
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"Error processing {crash_file_path}: {e}")
@@ -146,13 +138,105 @@ def _summarize_results(tool_buckets: Dict[str, BugBucket], tool_totals: Dict[str
                 'count': cnt,
                 'total_fuzzers': total,
                 'effectiveness': eff,
-                'found_in': sorted(list(bug.found_in))
+                'found_in': sorted(list(bug.found_in.keys())),
+                'mean_tte': mean(sorted(list(bug.found_in.values()))),
+                'min_tte': min(list(bug.found_in.values()))
             })
         result[tool_name] = {
             'total_fuzzers': total,
             'bugs': bugs_summary
         }
     return result
+
+
+def plot_summary(summary: Dict[str, Any], out_dir: str = '.') -> None:
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Build a consistent color map across error types
+    global_error_types = set()
+    for data in summary.values():
+        for b in data.get('bugs', []):
+            global_error_types.add(b.get('error_type', 'unknown'))
+
+    sorted_errors = sorted(global_error_types)
+    cmap = plt.get_cmap('tab20')
+    color_map = {err: cmap(i % cmap.N) for i, err in enumerate(sorted_errors)}
+
+    # Per-tool pie charts
+    for tool_name, data in summary.items():
+        counts = defaultdict(int)
+        for b in data.get('bugs', []):
+            counts[b.get('error_type', 'unknown')] += 1
+
+        if not counts:
+            continue
+
+        labels = list(counts.keys())
+        sizes = [counts[k] for k in labels]
+        colors = [color_map.get(l, (0.6, 0.6, 0.6)) for l in labels]
+
+        plt.figure(figsize=(6, 6))
+        plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
+        plt.axis('equal')
+        plt.title(f"{tool_name} - unique bugs by error type")
+        outpath = os.path.join(out_dir, f"{tool_name.replace(' ', '_')}_pie.png")
+        plt.tight_layout()
+        plt.savefig(outpath)
+        plt.close()
+        print(f"[+] Saved pie chart: {outpath}")
+
+    # Overall pie across all tools
+    global_counts = defaultdict(int)
+    for data in summary.values():
+        for b in data.get('bugs', []):
+            global_counts[b.get('error_type', 'unknown')] += 1
+
+    if global_counts:
+        labels = list(global_counts.keys())
+        sizes = [global_counts[k] for k in labels]
+        colors = [color_map.get(l, (0.6, 0.6, 0.6)) for l in labels]
+        plt.figure(figsize=(7, 7))
+        plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
+        plt.axis('equal')
+        plt.title("All tools - unique bugs by error type")
+        outpath = os.path.join(out_dir, "all_tools_pie.png")
+        plt.tight_layout()
+        plt.savefig(outpath)
+        plt.close()
+        print(f"[+] Saved overall pie chart: {outpath}")
+
+    # Histogram: number of unique bugs per tool
+    tools = []
+    counts = []
+    for tool_name, data in summary.items():
+        tools.append(tool_name)
+        counts.append(len(data.get('bugs', [])))
+
+    if tools:
+        plt.figure(figsize=(max(6, len(tools)), 6))
+        bars = plt.bar(tools, counts, color='tab:blue')
+        plt.ylabel('Unique bug signatures')
+        plt.title('Number of unique bugs per fuzzer')
+        plt.xticks(rotation=45, ha='right')
+        for bar, cnt in zip(bars, counts):
+            plt.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(), str(cnt), ha='center', va='bottom')
+        plt.tight_layout()
+        outpath = os.path.join(out_dir, 'bugs_per_fuzzer_hist.png')
+        plt.savefig(outpath)
+        plt.close()
+        print(f"[+] Saved histogram: {outpath}")
+
+def _get_start_time_universal(fuzz_dir):
+    return
+
+def _determine_start_time(fuzz_dir, toolname) -> int:
+    if "afl" in toolname.lower():
+        return get_start_time_afl(fuzz_dir)
+    elif "honggfuzz" in toolname.lower():
+        return get_start_time_hfuzz(fuzz_dir)
+    return _get_start_time_universal(fuzz_dir)
+ 
 
 def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_instr=False):
     """Scan provided fuzzer output directories and return structured bug data."""
@@ -161,83 +245,20 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
 
     for fuzz_dir in fuzzing_output_dirs:
         tool_name = format_fuzzer_name(fuzz_dir)
-        tool_buckets.setdefault(tool_name, BugBucket())
+        start_time = int(_determine_start_time(fuzz_dir, tool_name))
+        tool_buckets.setdefault(tool_name, BugBucket(start_time=start_time))
         tool_totals[tool_name] = tool_totals.get(tool_name, 0) + _count_expected_fuzzers(fuzz_dir)
         crash_files = _collect_crash_files(fuzz_dir, tool_name)
         for crash_file_path in crash_files:
             analyzed = _analyze_crash(crash_file_path, fuzz_dir, tool_name, asan_binary_path, llvm_instr)
             if analyzed:
                 bucket = tool_buckets[tool_name]
-                bug = bucket.add(analyzed['signature'], analyzed['error_type'], analyzed['fuzzer_id'])
+                bug = bucket.add(analyzed['signature'], analyzed['error_type'], analyzed['fuzzer_id'], analyzed['tte']-start_time)
                 bug.set_stack_if_missing(analyzed['functions'])
 
     return _summarize_results(tool_buckets, tool_totals)
 
-def parse_asan(log_text: str):
-    header_re = re.compile(r"ERROR: AddressSanitizer: (?P<error_type>[\w\-]+).*address (?P<address>0x[0-9a-fA-F]+)", re.MULTILINE)
-    access_re = re.compile(r"(?P<access>READ|WRITE) of size (?P<size>\d+)")
-    frame_line_re = re.compile(
-        r"^\s*#(?P<num>\d+)\s+(?P<pc>0x[0-9a-fA-F]+)\s+in\s+(?P<func>[^\s]+)"
-        r"(?:\s+(?P<file>[^:]+):(?P<line>\d+)(?::(?P<col>\d+))?)?",
-        re.MULTILINE
-    )
-    summary_re = re.compile(
-        r"^SUMMARY: AddressSanitizer: (?P<etype>[\w\-]+)\s+(?P<file>[^:]+):(?P<line>\d+)\s+in\s+(?P<func>[^\n]+)",
-        re.MULTILINE
-    )
 
-    freed_by_re = re.compile(r"freed by thread (?P<thread>\w+) here:", re.MULTILINE)
-    alloc_by_re = re.compile(r"allocated by thread (?P<thread>\w+) here:", re.MULTILINE)
-
-    parsed = {
-        "error_type": None,
-        "address": None,
-        "access": None,
-        "source_frames": [],
-        "freed_frames": [],
-        "alloc_frames": [],
-        "summary": None
-    }
-
-    if (h := header_re.search(log_text)):
-        parsed["error_type"] = h.group("error_type")
-        parsed["address"] = h.group("address")
-
-    if (a := access_re.search(log_text)):
-        parsed["access"] = {"type": a.group("access"), "size": int(a.group("size"))}
-
-    freed_match = freed_by_re.search(log_text)
-    alloc_match = alloc_by_re.search(log_text)
-    freed_start = freed_match.start() if freed_match else None
-    alloc_start = alloc_match.start() if alloc_match else None
-
-    for m in frame_line_re.finditer(log_text):
-        frame_obj = {
-            "frame": int(m.group("num")),
-            "pc": m.group("pc"),
-            "function": m.group("func"),
-            "file": m.group("file") or "",
-            "line": int(m.group("line")) if m.group("line") else None,
-            "col": int(m.group("col")) if m.group("col") else None,
-        }
-
-        pos = m.start()
-        if alloc_start and pos >= alloc_start:
-            parsed["alloc_frames"].append(frame_obj)
-        elif freed_start and pos >= freed_start:
-            parsed["freed_frames"].append(frame_obj)
-        else:
-            parsed["source_frames"].append(frame_obj)
-
-    if (s := summary_re.search(log_text)):
-        parsed["summary"] = {
-            "error_type": s.group("etype"),
-            "file": s.group("file"),
-            "line": int(s.group("line")),
-            "function": s.group("func").strip()
-        }
-
-    return parsed
 
 
 def get_source_functions(parsed_asan: Dict) -> List:
@@ -261,7 +282,7 @@ def get_stack_signature(function_stack: List, error_type: str):
     return hash_object.hexdigest()
 
 def format_fuzzer_name(dir_name):
-    name_map = {"aflpp": "AFL++", "symcc_afl": "SYMCC+AFL", "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
+    name_map = {"symcc_aflpp": "SYMCC & AFL++", "aflpp": "AFL++", "symcc_afl": "SYMCC & AFL", "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
     base_name = os.path.basename(dir_name)
     for key, formatted_name in name_map.items():
         if key in base_name.lower():
@@ -278,6 +299,7 @@ def main():
     parser.add_argument("-d", "--directories", required=True, nargs='+', help="List of fuzzer output directories.")
     parser.add_argument("--llvm-instr", action="store_true", help="Run binary with file as argument instead of stdin.")
     parser.add_argument("--json-out", help="Write the summary JSON to this path (optional).", default=None)
+    parser.add_argument("--plot-out", help="Directory where plots (PNGs) will be written (optional).", default=None)
 
     args = parser.parse_args()
 
@@ -305,6 +327,12 @@ def main():
             print(f"\n[+] JSON summary written to: {args.json_out}")
         except Exception as e:
             print(f"[!] Failed to write JSON summary to {args.json_out}: {e}")
+
+    if args.plot_out:
+        try:
+            plot_summary(summary, args.plot_out)
+        except Exception as e:
+            print(f"[!] Failed to generate plots: {e}")
 
 
 if __name__ == "__main__":
