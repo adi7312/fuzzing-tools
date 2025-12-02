@@ -476,6 +476,84 @@ def plot_boxplot(data, output_dir, plot_title):
     plt.close()
     print(f"  [+] Boxplot saved to {plot_path}")
 
+def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
+    if not os.path.exists(oracle_binary):
+        print(f"Error: Binary not found at '{oracle_binary}'")
+        sys.exit(1)
+    os.makedirs(output, exist_ok=True)
+
+
+    all_coverage_data = {}
+    
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_dir = {
+            executor.submit(analyze_fuzzer_dir, oracle_binary, fuzzer_dir): fuzzer_dir
+            for fuzzer_dir in directories if os.path.isdir(fuzzer_dir)
+        }
+        
+        for future in concurrent.futures.as_completed(future_to_dir):
+            fuzzer_dir = future_to_dir[future]
+            try:
+                coverage_data = future.result()
+                all_coverage_data.update(coverage_data)
+            except Exception as exc:
+                print(f"  [!] Error analyzing directory {fuzzer_dir}: {exc}")
+    
+    plot_violin(all_coverage_data, output, title)
+    plot_boxplot(all_coverage_data, output, title)
+    plot_histogram(all_coverage_data, output, title)
+
+    all_campaign_results = defaultdict(lambda: defaultdict(list))
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_dir = {
+            executor.submit(analyze_coverage_growth_in_time, oracle_binary, fuzzer_dir, time_limit): fuzzer_dir
+            for fuzzer_dir in directories if os.path.isdir(fuzzer_dir)
+        }
+        for future in concurrent.futures.as_completed(future_to_dir):
+            fuzzer_dir = future_to_dir[future]
+            try:
+                fuzzer_name, campaign_results = future.result()
+                for fuzzer_id, dfs in campaign_results.items():
+                    all_campaign_results[fuzzer_name][fuzzer_id].extend(dfs)
+            except Exception as exc:
+                print(f"  [!] Error analyzing coverage growth for {fuzzer_dir}: {exc}")
+
+    averaged_results = {}
+    for fuzzer_name, fuzzer_id_data in all_campaign_results.items():
+        for fuzzer_id, dfs in fuzzer_id_data.items():
+            if not dfs:
+                continue
+            
+            combined_df = pd.concat(dfs)
+            median_df = combined_df.groupby('Time')['Coverage'].median().reset_index()
+            
+            try:
+                is_asan = int(fuzzer_id) % 2 == 0
+            except (ValueError, TypeError):
+                is_asan = False
+            build_type = 'ASAN' if is_asan else 'Normal'
+            
+            key = f"{fuzzer_name} ({build_type})"
+            
+            sorted_times = sorted(median_df['Time'])
+            coverage_dict = dict(zip(median_df['Time'], median_df['Coverage']))
+            
+            last_coverage = 0
+            final_coverage_over_time = {}
+            for t in sorted_times:
+                coverage = coverage_dict[t]
+                if coverage < last_coverage:
+                    coverage = last_coverage
+                final_coverage_over_time[t] = coverage
+                last_coverage = coverage
+            
+            averaged_results[key] = final_coverage_over_time
+    print(averaged_results)
+    plot_coverage_growth(averaged_results, output, f"Median Coverage Growth Over Time - {title}")
+    print(f"\n[+] Plots and data saved in '{output}'")
+    return all_coverage_data
+
+
 def main():
     """Main function."""
     args = parse_args()
@@ -527,7 +605,6 @@ def main():
                 continue
             
             combined_df = pd.concat(dfs)
-            # Use median as it's more robust to outliers from failed runs
             median_df = combined_df.groupby('Time')['Coverage'].median().reset_index()
             
             try:
@@ -538,7 +615,6 @@ def main():
             
             key = f"{fuzzer_name} ({build_type})"
             
-            # Enforce monotonicity on the final median data
             sorted_times = sorted(median_df['Time'])
             coverage_dict = dict(zip(median_df['Time'], median_df['Coverage']))
             
@@ -554,6 +630,7 @@ def main():
             averaged_results[key] = final_coverage_over_time
     plot_coverage_growth(averaged_results, args.output, f"Median Coverage Growth Over Time - {args.title}")
     print(f"\n[+] Plots and data saved in '{args.output}'")
+    return all_coverage_data
 
 if __name__ == "__main__":
     main()

@@ -13,6 +13,10 @@ from runner.run_fuzz import (
     is_asan,
     setup_system
 )
+from utilities.utils import parse_duration
+from report.report_gen import generate_report
+import analysis.coverage_analysis as cov
+
 
 
 class Fuzzer:
@@ -64,18 +68,7 @@ def get_fuzzer_output_locations(config: dict, base_output_dir: str, fuzzer_objs:
     return locations
 
 
-def parse_duration(duration_str):
-    """Convert duration string like '12h' or '1d' to seconds."""
-    unit = duration_str[-1]
-    value = int(duration_str[:-1])
-    if unit == 'h':
-        return value * 3600
-    elif unit == 'd':
-        return value * 86400
-    elif unit == 'm':
-        return value * 60
-    else:
-        raise ValueError(f"Unsupported duration unit: {unit}")
+
 
 def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
     """Schedule fuzzing jobs based on config file."""
@@ -122,7 +115,7 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
 
     if dry_run:
         print("[+] Dry-run enabled, not scheduling any fuzzing jobs.")
-        return locations, 0
+        return locations
 
     accumulated_delay = 0
     for (fuzzer, fuzzer_config) in fuzzer_objs:
@@ -142,6 +135,7 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
 
         concolic = fuzzer_config.get('concolic')
         concolic_bin = fuzzer_config.get('concolic_bin')
+        env = fuzzer_config.get('env')
 
         if concolic and not concolic_bin:
             print(f"[!] Warning: Concolic execution specified for {fuzzer_name} but no binary provided")
@@ -150,7 +144,6 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
         start_time = current_time + accumulated_delay
         output_dir = os.path.join(base_output_dir, fuzzer_name)
 
-        # choose number of jobs from config if provided, otherwise default to number of binaries
         jobs = fuzzer_config.get('jobs', len(fuzzer_bins))
 
         scheduler.enterabs(
@@ -160,25 +153,24 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
             kwargs={
                 'fuzzer_type': fuzzer_name,
                 'targets': [os.path.abspath(b) for b in fuzzer_bins],
-                'input_dir': config['input_corpora'],
+                'input_dir': config.get('input_corpora'),
                 'output_dir': output_dir,
-                'timeout': config['timeout'],
+                'timeout': config.get('timeout'),
                 'clusters': campaigns,
                 'jobs': jobs,
                 'dictionary': config.get('dict'),
                 'concolic': concolic,
                 'concolic_bin': concolic_bin,
+                'env':env
             }
         )
 
         accumulated_delay += base_timeout
 
-    # Run the scheduler
     print(f"[*] Starting fuzzing pipeline for {config['target_name']}")
     print(f"[*] Total duration will be: {timedelta(seconds=accumulated_delay)}")
     scheduler.run()
 
-    # return discovered locations and total duration (seconds) for downstream analysis
     return locations
 
 def main():
@@ -197,7 +189,6 @@ def main():
         print(f"[!] Error: Config file not found: {args.config}")
         return 1
 
-    # read config early so we can pick up analysis binary paths
     try:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
@@ -212,12 +203,14 @@ def main():
         print(f"[!] Error running workflow: {e}")
         return 1
 
-    wait_seconds = parse_duration(cfg.get("timeout")) + 60 # additional 60 s for finishing up benchmarking
-    print(f"[*] Waiting {wait_seconds}s for fuzzing to complete before running analysis...")
-    time.sleep(wait_seconds)
+    if not args.dry_run:
+        wait_seconds = parse_duration(cfg.get("timeout")) + 60 # additional 60 s for finishing up benchmarking
+        print(f"[*] Waiting {wait_seconds}s for fuzzing to complete before running analysis...")
+        time.sleep(wait_seconds)
  
-
+    print(locations)
     analysis_out = args.analysis_output or os.path.join(args.output, 'analysis')
+    bug_res = {}
     if args.run_bugs:
         asan_bin = cfg.get('oracle_binary')
         if not asan_bin:
@@ -229,51 +222,49 @@ def main():
                 bug_dirs = [d['out_root'] for d in locations.values()]
                 print(f"[*] Running bug analysis on: {bug_dirs}")
                 summary = bug_analysis.get_unique_bugs(asan_bin, bug_dirs)
+                bug_res = summary
                 out_json = os.path.join(analysis_out, 'bug_summary.json')
                 try:
                     with open(out_json, 'w') as jf:
                         import json
                         json.dump(summary, jf, indent=2)
-                    print(f"  [+] Bug summary written to {out_json}")
+                    print(f"[+] Bug summary written to {out_json}")
                 except Exception as e:
-                    print(f"  [!] Failed to write bug summary: {e}")
-                # plots
+                    print(f"[!] Failed to write bug summary: {e}")
                 try:
                     bug_analysis.plot_summary(summary, analysis_out)
                 except Exception as e:
-                    print(f"  [!] Failed to plot bug summary: {e}")
+                    print(f"[!] Failed to plot bug summary: {e}")
             except Exception as e:
-                print(f"  [!] Bug analysis import or run failed: {e}")
+                print(f"[!] Bug analysis import or run failed: {e}")
 
+    coverage_res = {}
     if args.run_coverage:
         coverage_bin = cfg.get('coverage_binary')
         if not coverage_bin:
             print("[!] --run-coverage requires 'coverage_binary' to be set in the config file")
         else:
-            try:
-                import analysis.coverage_analysis as cov
-                os.makedirs(analysis_out, exist_ok=True)
-                fuzzer_dirs = [d['out_root'] for d in locations.values()]
-                print(f"[*] Running coverage analysis on: {fuzzer_dirs}")
-                all_coverage_data = {}
-                for fd in fuzzer_dirs:
-                    try:
-                        cov_data = cov.analyze_fuzzer_dir(coverage_bin, fd)
-                        all_coverage_data.update(cov_data)
-                    except Exception as e:
-                        print(f"  [!] Error analyzing {fd}: {e}")
-                try:
-                    cov.plot_violin(all_coverage_data, analysis_out, "Coverage Violin")
-                    cov.plot_boxplot(all_coverage_data, analysis_out, "Coverage Boxplot")
-                    cov.plot_histogram(all_coverage_data, analysis_out, "Mean Coverage Histogram")
-                except Exception as e:
-                    print(f"  [!] Failed to create coverage plots: {e}")
-            except Exception as e:
-                print(f"  [!] Coverage analysis import or run failed: {e}")
+            os.makedirs(analysis_out, exist_ok=True)
+            fuzzer_dirs = [d['out_root'] for d in locations.values()]
+            timeout_seconds = parse_duration(cfg.get("timeout"))
+            coverage_res = cov.run_cov_analysis(coverage_bin, fuzzer_dirs, analysis_out,cfg.get("target_name"),timeout_seconds)
 
-    return 0
+    os.makedirs(analysis_out, exist_ok=True)
+    target_label = (cfg.get('target_name') or 'benchmark').replace(' ', '_')
+    safe_name = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in target_label)
+    report_path = os.path.join(args.analysis_output, f"{safe_name}_report.html")
+    try:
+        generate_report(
+            config_path=args.config,
+            analysis_dir=analysis_out,
+            coverage_summary=coverage_res or None,
+            bug_summary=bug_res or None,
+            output_path=report_path,
+        )
+        print(f"[+] Report generated at {report_path}")
+    except Exception as e:
+        print(f"[!] Failed to generate report: {e}")
+
 
 if __name__ == "__main__":
-    exit(main())
-
-
+    main()

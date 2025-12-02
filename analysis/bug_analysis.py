@@ -15,7 +15,7 @@ class Bug:
     def __init__(self, signature: str, error_type: str):
         self.signature = signature
         self.error_type = error_type
-        self.found_in = {} # fuzzer_id : tte
+        self.found_in = {}
         self.stack = []
 
     def add_finder(self, fuzzer_id: str, tte: int):
@@ -46,6 +46,11 @@ class BugBucket:
 
     def items(self):
         return self._bugs.items()
+
+def s_to_hm(timestamp: int):
+    h = timestamp // 3600
+    m = (timestamp % 3600) // 60
+    return f"{h}:{m:02d}"
 
 def _extract_fuzzer_id(crash_file_path: str, fuzz_dir: str) -> str:
     rel = os.path.relpath(os.path.dirname(crash_file_path), fuzz_dir)
@@ -119,7 +124,19 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
                     'functions': functions,
                     'tte':int(tte)
                 }
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            
+    except (subprocess.TimeoutExpired) as e:
+        tte = os.path.getmtime(crash_file_path)
+        fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
+        return {
+                    'signature': signature,
+                    'error_type': 'timeout',
+                    'fuzzer_id': fuzzer_id,
+                    'functions': functions,
+                    'tte':int(tte)
+                }
+    
+    except (FileNotFoundError) as e:
         print(f"Error processing {crash_file_path}: {e}")
     return None
 
@@ -139,8 +156,8 @@ def _summarize_results(tool_buckets: Dict[str, BugBucket], tool_totals: Dict[str
                 'total_fuzzers': total,
                 'effectiveness': eff,
                 'found_in': sorted(list(bug.found_in.keys())),
-                'mean_tte': mean(sorted(list(bug.found_in.values()))),
-                'min_tte': min(list(bug.found_in.values()))
+                'mean_tte': s_to_hm(mean(sorted(list(bug.found_in.values())))),
+                'min_tte': s_to_hm(min(list(bug.found_in.values())))
             })
         result[tool_name] = {
             'total_fuzzers': total,
@@ -206,7 +223,6 @@ def plot_summary(summary: Dict[str, Any], out_dir: str = '.') -> None:
         plt.close()
         print(f"[+] Saved overall pie chart: {outpath}")
 
-    # Histogram: number of unique bugs per tool
     tools = []
     counts = []
     for tool_name, data in summary.items():
@@ -228,13 +244,12 @@ def plot_summary(summary: Dict[str, Any], out_dir: str = '.') -> None:
         print(f"[+] Saved histogram: {outpath}")
 
 def _get_start_time_universal(fuzz_dir):
-    return
+    try:
+        return int(os.path.getctime(fuzz_dir))
+    except OSError:
+        return 0
 
 def _determine_start_time(fuzz_dir, toolname) -> int:
-    if "afl" in toolname.lower():
-        return get_start_time_afl(fuzz_dir)
-    elif "honggfuzz" in toolname.lower():
-        return get_start_time_hfuzz(fuzz_dir)
     return _get_start_time_universal(fuzz_dir)
  
 
@@ -245,7 +260,8 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
 
     for fuzz_dir in fuzzing_output_dirs:
         tool_name = format_fuzzer_name(fuzz_dir)
-        start_time = int(_determine_start_time(fuzz_dir, tool_name))
+        start_time_val = _determine_start_time(fuzz_dir, tool_name)
+        start_time = int(start_time_val) if start_time_val is not None else 0
         tool_buckets.setdefault(tool_name, BugBucket(start_time=start_time))
         tool_totals[tool_name] = tool_totals.get(tool_name, 0) + _count_expected_fuzzers(fuzz_dir)
         crash_files = _collect_crash_files(fuzz_dir, tool_name)

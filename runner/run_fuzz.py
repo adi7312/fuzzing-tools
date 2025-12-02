@@ -31,7 +31,7 @@ def launch_cmd_in_screen(session_name, cmd, cwd=None):
     print(f"[+] screen session: {session_name} -> {cmd}")
     subprocess.run(screen_cmd, shell=True, check=False)
 
-def launch_honggfuzz(core_id, input_dir, cluster_dir, crash_dir, stats_file, target, timeout, session_name, dictionary, workspace=None):
+def launch_honggfuzz(core_id, input_dir, cluster_dir, crash_dir, stats_file, target, timeout, session_name, dictionary, workspace=None, env=None):
     workspace_arg = f"-W \"{workspace}\"" if workspace else ""
     dict_args = f"-w \"{dictionary}\"" if dictionary else ""
     sanitizers = f"-S --sanitizers_del_report true" if "asan" in target else ""
@@ -52,9 +52,9 @@ def launch_honggfuzz(core_id, input_dir, cluster_dir, crash_dir, stats_file, tar
     )
     print(f"[+] Launching {session_name} on core {core_id} -> {target}")
     print(cmd)
-    subprocess.run(cmd, shell=True, check=False)
+    subprocess.run(cmd, shell=True, check=False,env=env)
 
-def launch_afl(core_id, input_dir, output_dir, target, timeout, session_name, dictionary, is_main, is_aflpp):
+def launch_afl(core_id, input_dir, output_dir, target, timeout, session_name, dictionary, is_main, is_aflpp, env=None):
     fuzzer_id = session_name[-6:]
     if is_main:
         afl_mode = f"-M {fuzzer_id}"
@@ -78,9 +78,9 @@ def launch_afl(core_id, input_dir, output_dir, target, timeout, session_name, di
     )
     print(cmd)
     print(f"[+] Launching {session_name} on core {core_id} -> {target}")
-    subprocess.run(cmd, shell=True, check=False)
+    subprocess.run(cmd, shell=True, check=False,env=env)
 
-def launch_symcc(core_id, fuzzer_id, concolic_bin, session_name, timeout, output_dir):
+def launch_symcc(core_id, fuzzer_id, concolic_bin, session_name, timeout, output_dir, env=None):
     cmd = (
         f"screen -dmS {session_name} "
         f"bash -lc 'taskset -c {core_id} timeout {timeout} "
@@ -89,9 +89,9 @@ def launch_symcc(core_id, fuzzer_id, concolic_bin, session_name, timeout, output
     )
     print(cmd)
     print(f"[+] Launching {session_name} on core {core_id} -> {concolic_bin}")
-    subprocess.run(cmd, shell=True, check=False)
+    subprocess.run(cmd, shell=True, check=False, env=env)
 
-def launch_libfuzzer(core_id, input_dir, cluster_dir, stats_file, target, timeout, session_name, dictionary):
+def launch_libfuzzer(core_id, input_dir, cluster_dir, stats_file, target, timeout, session_name, dictionary, env=None):
     exact_artifact_path = os.path.join(cluster_dir, "crash")
     dict_arg = f"-dict=\"{dictionary}\"" if dictionary else ""
 
@@ -104,7 +104,7 @@ def launch_libfuzzer(core_id, input_dir, cluster_dir, stats_file, target, timeou
     )
     print(f"[+] Launching {session_name} on core {core_id} -> {target}")
     print(cmd)
-    subprocess.run(cmd, shell=True, check=False)
+    subprocess.run(cmd, shell=True, check=False,env=env)
 
 
 def is_asan(binary_path):
@@ -140,6 +140,7 @@ def run_fuzzing_session(
     dictionary=None,
     concolic=None,
     concolic_bin=None,
+    env=None
 ):
     
 

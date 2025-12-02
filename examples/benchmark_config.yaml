@@ -27,3 +27,9 @@ fuzzers:
     binaries:
       - "/path/to/libfuzzer_fuzz"
       - "/path/to/libfuzzer_fuzz_ASAN"
+
+  afl:
+    binaries:
+      - "/path/to/afl_fuzz"
+      - "patho/to/afl_asan_fuzz"
+    env: "/path/to/file.env" # Load particular env

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>${target_name} fuzzing summary</title>
+	<style>
+		body {
+			font-family: Arial, Helvetica, sans-serif;
+			margin: 0;
+			padding: 2rem;
+			background: #f8f9fb;
+			color: #121417;
+			line-height: 1.5;
+		}
+		h1 {
+			margin-bottom: 0.25rem;
+		}
+		h2 {
+			border-bottom: 2px solid #d9dee7;
+			padding-bottom: 0.25rem;
+		}
+		h3 {
+			margin-top: 2rem;
+			margin-bottom: 0.5rem;
+		}
+		.meta {
+			color: #5a6573;
+			margin-bottom: 2rem;
+		}
+		table {
+			border-collapse: collapse;
+			width: 100%;
+			margin-bottom: 1.5rem;
+			background: #fff;
+			box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+		}
+		th, td {
+			border: 1px solid #e0e6f1;
+			padding: 0.5rem 0.75rem;
+			text-align: left;
+		}
+		th {
+			background: #f0f3f9;
+			font-weight: 600;
+		}
+		ul {
+			list-style-type: disc;
+			padding-left: 1.25rem;
+		}
+		.card {
+			background: #fff;
+			padding: 1.25rem;
+			margin-bottom: 1.5rem;
+			border-radius: 6px;
+			box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+		}
+		.figure-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+			gap: 1rem;
+		}
+		.figure-grid figure {
+			background: #fff;
+			border-radius: 6px;
+			padding: 0.75rem;
+			margin: 0;
+			box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+		}
+		.figure-grid img {
+			width: 100%;
+			border-radius: 4px;
+		}
+		.bug-detail {
+			margin-bottom: 2rem;
+		}
+		.stack-trace {
+			background: #1c2333;
+			color: #fafbff;
+			padding: 0.75rem;
+			border-radius: 6px;
+			font-family: "Courier New", Courier, monospace;
+			font-size: 0.9rem;
+			overflow-x: auto;
+		}
+		.placeholder {
+			font-style: italic;
+			color: #7a869a;
+			margin-bottom: 1rem;
+		}
+	</style>
+</head>
+<body>
+	<header>
+		<h1>${target_name} fuzzing summary</h1>
+		<p class="meta">Generated on ${generated_at}</p>
+	</header>
+
+	<section>
+		<h2>Benchmark configuration</h2>
+		<div class="card">
+			${benchmark_table}
+		</div>
+		<div class="card">
+			<h3>Fuzzers to be tested</h3>
+			${fuzzer_list}
+		</div>
+	</section>
+
+	<section>
+		<h2>Coverage analysis</h2>
+		<div class="card">
+			${coverage_stats_table}
+		</div>
+		<div class="card">
+			<h3>Figures</h3>
+			${coverage_figures}
+		</div>
+		<div class="card">
+			<h3>Statistical tests</h3>
+			${coverage_stats_notes}
+		</div>
+		<div class="card">
+			<h3>Pairwise coverage</h3>
+			${coverage_pairwise_notes}
+		</div>
+	</section>
+
+	<section>
+		<h2>Bug analysis</h2>
+		<div class="card">
+			${bug_matrix_table}
+		</div>
+		<div class="card">
+			<h3>Figures</h3>
+			${bug_figures}
+		</div>
+		<div class="card">
+			<h3>Bug details</h3>
+			${bug_details}
+		</div>
+	</section>
+</body>
+</html>
