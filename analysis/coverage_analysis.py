@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import argparse
 import os
 import subprocess
@@ -7,21 +5,19 @@ import sys
 import tempfile
 import json
 import concurrent.futures
-import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
 import shutil
-from collections import defaultdict
 
-def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Efficient code coverage analysis tool for fuzzers.")
-    parser.add_argument("-b", "--binary", required=True, help="Path to the instrumented binary.")
-    parser.add_argument("-d", "--directories", required=True, nargs='+', help="List of fuzzer output directories.")
-    parser.add_argument("-o", "--output", default="coverage_analysis", help="Output directory for plots and data.")
-    parser.add_argument("-t", "--title", default="Code Coverage Analysis", help="Title for the plots.")
-    parser.add_argument("--time-limit", type=int, default=3600*12, help="Time limit in seconds for coverage growth analysis.")
-    return parser.parse_args()
+from collections import defaultdict
+from utilities.utils import format_fuzzer_name
+from analysis.visuals.coverage_visualization import (
+    export_pairwise_heatmap,
+    export_mann_whitney_heatmap,
+    plot_coverage_growth,
+    plot_histogram,
+    plot_violin,
+)
+
 
 def get_coverage(binary_path, corpus_dir):
     """Run the instrumented binary and get absolute branch coverage."""
@@ -57,14 +53,6 @@ def get_coverage(binary_path, corpus_dir):
             print(f"  [!] Error processing coverage data: {e}")
     return 0
 
-def format_fuzzer_name(dir_name):
-    """Format fuzzer directory names for display."""
-    name_map = {"aflpp": "AFL++", "symcc_afl": "SYMCC+AFL", "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
-    base_name = os.path.basename(dir_name)
-    for key, formatted_name in name_map.items():
-        if key in base_name.lower():
-            return formatted_name
-    return base_name.replace('_out', '').replace('_', ' ').title()
 
 def get_time_series(sub_dir, T):
     """Get a time series of files, bucketed by modification time."""
@@ -97,14 +85,14 @@ def get_time_series(sub_dir, T):
     return bucketed
 
 def copy_files_parallel(files, dest_dir):
-    """Copy files to a directory in parallel."""
     with concurrent.futures.ThreadPoolExecutor() as executor:
         list(executor.map(lambda f: shutil.copy(f, dest_dir), files))
 
 def analyze_coverage_growth_in_time(binary_path, fuzzer_out_dir, time_limit):
-    """Analyze coverage growth and return raw campaign results for a fuzzer directory."""
     print(f"[*] Analyzing coverage growth for {fuzzer_out_dir}...")
+    print(f"d1: {fuzzer_out_dir}")
     fuzzer_name = format_fuzzer_name(fuzzer_out_dir)
+    print(f"Fuzzer name: {fuzzer_name}")
     campaign_results = defaultdict(list)
 
     campaign_dirs = sorted([d for d in os.listdir(fuzzer_out_dir) if d.startswith('c') and os.path.isdir(os.path.join(fuzzer_out_dir, d))], key=lambda d: int(d[1:]))
@@ -148,87 +136,6 @@ def analyze_coverage_growth_in_time(binary_path, fuzzer_out_dir, time_limit):
     return fuzzer_name, campaign_results
 
 
-def plot_violin(data, output_dir, plot_title):
-    print("[*] Creating violin plot...")
-    
-    if not data:
-        print("  [!] No data to plot.")
-        return
-
-    plot_data = []
-    for key, coverages in data.items():
-        parts = key.rsplit('_', 1)
-        fuzzer_name = parts[0]
-        fuzzer_id = parts[1] if len(parts) > 1 else '1'
-        for cov in coverages:
-            plot_data.append({"Fuzzer": fuzzer_name, "ID": fuzzer_id, "Coverage": cov})
-    
-    if not plot_data:
-        print("  [!] No data to create a plot from.")
-        return
-        
-    df = pd.DataFrame(plot_data)
-    if df.empty:
-        print("  [!] DataFrame is empty, skipping plot.")
-        return
-
-    # Rename IDs for clarity in the plot legend
-    df['ID'] = df['ID'].replace({'fuzz01': 'Normal', 'fuzz02': 'ASAN'})
-    hue_order = ['Normal', 'ASAN']
-
-    # Order fuzzers by mean coverage (descending)
-    mean_cov = df.groupby('Fuzzer')['Coverage'].mean().sort_values(ascending=False)
-    order = mean_cov.index
-
-    plt.figure(figsize=(12, 8))
-    sns.set(style="whitegrid")
-
-    # --- Main improvement section ---
-    ax = sns.violinplot(
-        x="Fuzzer",
-        y="Coverage",
-        hue="ID",
-        data=df,
-        split=True,
-        inner="box",              # clearer than quartile lines
-        bw_adjust=0.5,            # reduces oversmoothing for small samples
-        cut=0,                    # prevents extending beyond data range
-        scale="width",            # keeps violins visually balanced
-        order=order,
-        hue_order=hue_order
-    )
-
-    # Overlay individual data points for context
-    sns.stripplot(
-        x="Fuzzer",
-        y="Coverage",
-        hue="ID",
-        data=df,
-        order=order,
-        hue_order=hue_order,
-        dodge=True,
-        jitter=True,
-        alpha=0.5,
-        color="k",
-        ax=ax
-    )
-
-    plt.title(plot_title)
-    plt.ylabel("Branch Coverage")
-    plt.xlabel("Fuzzer")
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    # Prevent duplicate legends (from stripplot)
-    handles, labels = ax.get_legend_handles_labels()
-    plt.legend(handles[:2], labels[:2], title="ID")
-
-    plot_path = os.path.join(output_dir, "coverage_violin_plot.png")
-    plt.savefig(plot_path)
-    plt.close()
-    print(f"  [+] Violin plot saved to {plot_path}")
-
 
 def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
     """
@@ -236,7 +143,12 @@ def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
     The fuzzer name is inferred from the directory name.
     """
     coverage_data = {}
-    fuzzer_name = format_fuzzer_name(os.path.basename(fuzzer_out_dir))
+    print(f"d1: {fuzzer_out_dir}")
+    if(fuzzer_out_dir[-1] == '/'):
+        tmp = list(fuzzer_out_dir)
+        tmp[-1] = ''
+        fuzzer_out_dir = ''.join(list(tmp))
+    fuzzer_name = format_fuzzer_name(fuzzer_out_dir)
 
     # Directory structure: fuzzer_name_out/c{campain_id}/fuzzer{id}
     campaign_dirs = sorted(
@@ -277,204 +189,7 @@ def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
 
     return coverage_data
 
-def plot_coverage_growth(data, output_dir, plot_title):
-    """Plot coverage growth over time, creating separate plots for ASAN and Normal builds."""
-    print("[*] Creating coverage growth plots...")
-    if not data:
-        print("  [!] No data to plot.")
-        return
 
-    normal_data = {k: v for k, v in data.items() if 'ASAN' not in k}
-    asan_data = {k: v for k, v in data.items() if 'ASAN' in k}
-
-    def do_plot(plot_data, build_type):
-        if not plot_data:
-            print(f"  [!] No data to plot for {build_type} builds.")
-            return
-        plt.figure(figsize=(12, 8))
-        import matplotlib.ticker as mticker
-        sorted_fuzzer_names = sorted(plot_data.keys())
-        xmax = 0.0
-        for fuzzer_name in sorted_fuzzer_names:
-            coverage_data = plot_data[fuzzer_name]
-            if not coverage_data:
-                continue
-            df = pd.DataFrame(list(coverage_data.items()), columns=['Time', 'Coverage']).sort_values(by='Time')
-            # convert seconds to hours for x-axis
-            df['TimeHours'] = df['Time'] / 3600.0
-            plt.plot(df['TimeHours'], df['Coverage'], linestyle='-', label=fuzzer_name.replace(f' ({build_type})', ''))
-            xmax = max(xmax, df['TimeHours'].max())
-
-        plt.title(f"{plot_title} - {build_type}")
-        plt.xlabel("Time (hours)")
-        plt.ylabel("Average Branch Coverage")
-        plt.grid(True)
-        plt.legend()
-
-        # start x-axis at 15 minutes (0.25 hours) if the data extends beyond that,
-        # otherwise keep the x-axis starting at 0 to avoid empty plots.
-        xmin = 0.25 if xmax > 0.25 else 0.0
-        if xmax > 0:
-            plt.xlim(left=xmin, right=xmax)
-        ax = plt.gca()
-        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
-        plt.tight_layout()
-
-        plot_path = os.path.join(output_dir, f"coverage_growth_{build_type.lower()}.png")
-        plt.savefig(plot_path)
-        print(f"  [+] Coverage growth plot saved to {plot_path}")
-        plt.close()
-
-    do_plot(normal_data, "Normal")
-    do_plot(asan_data, "ASAN")
-
-
-def plot_histogram(data, output_dir, plot_title):
-    """Create a histogram of mean total reached coverage for each fuzzer."""
-    print("[*] Creating histogram of mean coverage...")
-
-    if not data:
-        print("  [!] No data to plot.")
-        return
-
-    # Separate data into Normal and ASAN
-    normal_data = {k: v for k, v in data.items() if 'fuzz01' in k}
-    asan_data = {k: v for k, v in data.items() if 'fuzz02' in k}
-
-    def do_plot(plot_data, build_type):
-        if not plot_data:
-            print(f"  [!] No data to plot for {build_type} builds.")
-            return
-
-        mean_coverage_data = defaultdict(list)
-        for key, coverages in plot_data.items():
-            fuzzer_name = key.rsplit('_', 1)[0]
-            mean_coverage_data[fuzzer_name].extend(coverages)
-
-        processed_plot_data = []
-        for fuzzer_name, coverages in mean_coverage_data.items():
-            if coverages:
-                mean_cov = sum(coverages) / len(coverages)
-                processed_plot_data.append({"Fuzzer": fuzzer_name, "Mean Coverage": mean_cov})
-
-        if not processed_plot_data:
-            print(f"  [!] No data to create a plot from for {build_type} builds.")
-            return
-
-        df = pd.DataFrame(processed_plot_data)
-        if df.empty:
-            print(f"  [!] DataFrame is empty for {build_type}, skipping plot.")
-            return
-
-        df = df.sort_values(by='Mean Coverage', ascending=False)
-
-        plt.figure(figsize=(12, 8))
-        sns.set(style="whitegrid")
-        ax = sns.barplot(x="Fuzzer", y="Mean Coverage", data=df, palette="viridis")
-
-        plt.title(f"Mean Total Reached Coverage - {plot_title} - {build_type}")
-        plt.ylabel("Mean Branch Coverage")
-        plt.xlabel("Fuzzer")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-
-        for p in ax.patches:
-            ax.annotate(f"{p.get_height():.1f}",
-                        (p.get_x() + p.get_width() / 2., p.get_height()),
-                        ha='center', va='center',
-                        xytext=(0, 9),
-                        textcoords='offset points')
-
-        plot_path = os.path.join(output_dir, f"mean_coverage_histogram_{build_type.lower()}.png")
-        plt.savefig(plot_path)
-        plt.close()
-        print(f"  [+] Histogram saved to {plot_path}")
-
-    do_plot(normal_data, "Normal")
-    do_plot(asan_data, "ASAN")
-
-
-def plot_boxplot(data, output_dir, plot_title):
-    """
-    Create a boxplot of coverage data (Normal vs ASAN) for each fuzzer.
-    """
-    print("[*] Creating boxplot...")
-
-    if not data:
-        print("  [!] No data to plot.")
-        return
-
-    plot_data = []
-    for key, coverages in data.items():
-        parts = key.rsplit('_', 1)
-        fuzzer_name = parts[0]
-        fuzzer_id = parts[1] if len(parts) > 1 else '1'
-        for cov in coverages:
-            plot_data.append({"Fuzzer": fuzzer_name, "ID": fuzzer_id, "Coverage": cov})
-    
-    if not plot_data:
-        print("  [!] No data to create a plot from.")
-        return
-
-    df = pd.DataFrame(plot_data)
-    if df.empty:
-        print("  [!] DataFrame is empty, skipping plot.")
-        return
-
-    # Rename IDs for clarity
-    df['ID'] = df['ID'].replace({'fuzz01': 'Normal', 'fuzz02': 'ASAN'})
-    hue_order = ['Normal', 'ASAN']
-
-    # Order fuzzers by mean coverage (descending)
-    mean_cov = df.groupby('Fuzzer')['Coverage'].mean().sort_values(ascending=False)
-    order = mean_cov.index
-
-    plt.figure(figsize=(12, 8))
-    sns.set(style="whitegrid")
-
-    # --- Main plot ---
-    ax = sns.boxplot(
-        x="Fuzzer",
-        y="Coverage",
-        hue="ID",
-        data=df,
-        order=order,
-        hue_order=hue_order,
-        width=0.6,
-        fliersize=5,        # control size of outlier markers
-        linewidth=1.2
-    )
-
-    # Optional: overlay actual data points
-    sns.stripplot(
-        x="Fuzzer",
-        y="Coverage",
-        hue="ID",
-        data=df,
-        order=order,
-        hue_order=hue_order,
-        dodge=True,
-        jitter=True,
-        alpha=0.4,
-        color="k",
-        ax=ax
-    )
-
-    plt.title(plot_title)
-    plt.ylabel("Branch Coverage")
-    plt.xlabel("Fuzzer")
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    # Remove duplicate legend from stripplot overlay
-    handles, labels = ax.get_legend_handles_labels()
-    plt.legend(handles[:2], labels[:2], title="ID")
-
-    plot_path = os.path.join(output_dir, "coverage_boxplot.png")
-    plt.savefig(plot_path)
-    plt.close()
-    print(f"  [+] Boxplot saved to {plot_path}")
 
 def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
     if not os.path.exists(oracle_binary):
@@ -484,7 +199,7 @@ def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
 
 
     all_coverage_data = {}
-    
+    print(directories)
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_dir = {
             executor.submit(analyze_fuzzer_dir, oracle_binary, fuzzer_dir): fuzzer_dir
@@ -500,8 +215,9 @@ def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
                 print(f"  [!] Error analyzing directory {fuzzer_dir}: {exc}")
     
     plot_violin(all_coverage_data, output, title)
-    plot_boxplot(all_coverage_data, output, title)
     plot_histogram(all_coverage_data, output, title)
+    export_pairwise_heatmap(all_coverage_data, output)
+    export_mann_whitney_heatmap(all_coverage_data, output)
 
     all_campaign_results = defaultdict(lambda: defaultdict(list))
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -553,9 +269,16 @@ def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
     print(f"\n[+] Plots and data saved in '{output}'")
     return all_coverage_data
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Efficient code coverage analysis tool for fuzzers.")
+    parser.add_argument("-b", "--binary", required=True, help="Path to the instrumented binary.")
+    parser.add_argument("-d", "--directories", required=True, nargs='+', help="List of fuzzer output directories.")
+    parser.add_argument("-o", "--output", default="coverage_analysis", help="Output directory for plots and data.")
+    parser.add_argument("-t", "--title", default="Code Coverage Analysis", help="Title for the plots.")
+    parser.add_argument("--time-limit", type=int, default=3600*12, help="Time limit in seconds for coverage growth analysis.")
+    return parser.parse_args()
 
 def main():
-    """Main function."""
     args = parse_args()
     if not os.path.exists(args.binary):
         print(f"Error: Binary not found at '{args.binary}'")
@@ -565,6 +288,7 @@ def main():
 
     all_coverage_data = {}
     
+
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_dir = {
             executor.submit(analyze_fuzzer_dir, args.binary, fuzzer_dir): fuzzer_dir
@@ -580,8 +304,9 @@ def main():
                 print(f"  [!] Error analyzing directory {fuzzer_dir}: {exc}")
     
     plot_violin(all_coverage_data, args.output, args.title)
-    plot_boxplot(all_coverage_data, args.output, args.title)
     plot_histogram(all_coverage_data, args.output, args.title)
+    export_pairwise_heatmap(all_coverage_data, args.output)
+    export_mann_whitney_heatmap(all_coverage_data, args.output)
 
     all_campaign_results = defaultdict(lambda: defaultdict(list))
     with concurrent.futures.ThreadPoolExecutor() as executor:

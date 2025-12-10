@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from statistics import StatisticsError, mean, median, stdev
 from string import Template
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -42,20 +42,27 @@ def _load_json(path: Optional[str]) -> Dict[str, Any]:
 
 
 def _format_fuzzer_name(raw: str) -> str:
-	mapping = {
-		"symcc_aflpp": "SYMCC & AFL++",
-		"aflpp": "AFL++",
-		"symcc_afl": "SYMCC & AFL",
-		"symcc": "SYMCC",
-		"afl": "AFL",
-		"hfuzz": "Honggfuzz",
-		"honggfuzz": "Honggfuzz",
-		"libfuzzer": "LibFuzzer",
-		"lf": "LibFuzzer",
-		"klee": "KLEE",
-	}
+	mapping: List[Tuple[str, str]] = [
+		("symcc_aflpp", "SYMCC & AFL++"),
+		("afl++", "AFL++"),
+		("aflpp", "AFL++"),
+		("symcc_afl", "SYMCC & AFL"),
+		("symcc", "SYMCC"),
+		("afl", "AFL"),
+		("hfuzz", "Honggfuzz"),
+		("honggfuzz", "Honggfuzz"),
+		("libfuzzer", "LibFuzzer"),
+		("lf", "LibFuzzer"),
+		("klee", "KLEE"),
+	]
 	normalized = raw.lower().replace(" ", "")
-	for key, label in mapping.items():
+	if normalized.endswith("_out"):
+		normalized = normalized[:-4]
+	normalized = normalized.strip("_")
+	for key, label in mapping:
+		if normalized == key:
+			return label
+	for key, label in mapping:
 		if key in normalized:
 			return label
 	clean = raw.replace("_out", "").replace("_", " ").strip()
@@ -103,9 +110,28 @@ def _format_number(value: Optional[float]) -> str:
 	return f"{value:.2f}"
 
 
-def _collect_coverage_stats(coverage_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _format_duration(seconds: Optional[float]) -> Optional[str]:
+	"""Convert seconds into HH:MM:SS for readability."""
+	if seconds is None:
+		return None
+	try:
+		total_seconds = int(round(float(seconds)))
+	except (TypeError, ValueError):
+		return None
+	total_seconds = max(total_seconds, 0)
+	hours, remainder = divmod(total_seconds, 3600)
+	minutes, secs = divmod(remainder, 60)
+	return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _collect_coverage_stats(
+	coverage_summary: Dict[str, Any],
+	key_filter: Optional[Callable[[str], bool]] = None,
+) -> List[Dict[str, Any]]:
 	grouped: Dict[str, List[float]] = defaultdict(list)
 	for key, values in coverage_summary.items():
+		if key_filter and not key_filter(key):
+			continue
 		if not isinstance(values, Iterable):
 			continue
 		fuzzer_name = key.rsplit('_', 1)[0]
@@ -140,8 +166,11 @@ def _collect_coverage_stats(coverage_summary: Dict[str, Any]) -> List[Dict[str, 
 	return stats
 
 
-def _render_coverage_table(coverage_summary: Dict[str, Any]) -> str:
-	stats = _collect_coverage_stats(coverage_summary)
+def _render_coverage_table(
+	coverage_summary: Dict[str, Any],
+	key_filter: Optional[Callable[[str], bool]] = None,
+) -> str:
+	stats = _collect_coverage_stats(coverage_summary, key_filter)
 	headers = ["Fuzzer", "Samples", "Mean", "Std", "Min", "Median", "Max"]
 	rows = [
 		[
@@ -156,6 +185,35 @@ def _render_coverage_table(coverage_summary: Dict[str, Any]) -> str:
 		for entry in stats
 	]
 	return _render_table(headers, rows, "No coverage statistics available.")
+
+
+def _infer_build_type(key: str) -> str:
+	lower = key.lower()
+	if "asan" in lower:
+		return "ASAN"
+	suffix = key.rsplit('_', 1)[-1].lower()
+	if suffix.startswith("fuzz"):
+		digits = "".join(ch for ch in suffix if ch.isdigit())
+		if digits:
+			try:
+				return "ASAN" if int(digits) % 2 == 0 else "Normal"
+			except ValueError:
+				pass
+	return "Normal"
+
+
+def _compose_stats_notes(
+	stats_note: Optional[str],
+	pairwise_note: Optional[str],
+) -> str:
+	stats_html = stats_note or '<p class="placeholder">TBD: Statistical tests</p>'
+	pair_html = pairwise_note or '<p class="placeholder">TBD: Pairwise coverage</p>'
+	return (
+		'<div class="stat-grid">'
+		f'<div><h4>Statistical tests</h4>{stats_html}</div>'
+		f'<div><h4>Pairwise coverage</h4>{pair_html}</div>'
+		'</div>'
+	)
 
 
 def _collect_bug_details(bug_summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -244,8 +302,8 @@ def _render_bug_details(bug_summary: Dict[str, Any], ordered_tools: Sequence[str
 
 		add_metric_row("Effectiveness", lambda m: f"{m.get('effectiveness', 0)*100:.1f}%" if m.get("effectiveness") is not None else None)
 		add_metric_row("Finders", lambda m: str(m.get("count")) if m.get("count") is not None else None)
-		add_metric_row("Min TTE", lambda m: str(m.get("min_tte")) if m.get("min_tte") is not None else None)
-		add_metric_row("Mean TTE", lambda m: str(m.get("mean_tte")) if m.get("mean_tte") is not None else None)
+		add_metric_row("Min TTE", lambda m: _format_duration(m.get("min_tte")))
+		add_metric_row("Mean TTE", lambda m: _format_duration(m.get("mean_tte")))
 		add_metric_row("Max TTE", lambda m: str(m.get("max_tte")) if m.get("max_tte") is not None else None)
 
 		metrics_table = _render_table(metrics_headers, metric_rows, "No per-tool data available.")
@@ -270,15 +328,20 @@ def _rel_path(target: str, reference: str) -> str:
 		return target
 
 
-def _collect_figures(base_dir: str, filenames: Sequence[Tuple[str, str]], report_path: str) -> List[Tuple[str, str]]:
-	figures: List[Tuple[str, str]] = []
-	for name, caption in filenames:
-		if not name:
-			continue
-		candidate = os.path.join(base_dir, name)
-		if os.path.exists(candidate):
-			figures.append((_rel_path(candidate, report_path), caption))
-	return figures
+
+def _render_single_figure(base_dir: str, filename: str, caption: str, report_path: str) -> str:
+	label = caption or "Figure"
+	if not filename:
+		return f'<p class="placeholder">{label} not available.</p>'
+	path = os.path.join(base_dir, filename)
+	if not os.path.exists(path):
+		return f'<p class="placeholder">{label} not available.</p>'
+	rel = _rel_path(path, report_path)
+	parts = ['<figure class="figure-block">', f'<img src="{rel}" alt="{label}" />']
+	if caption:
+		parts.append(f"<figcaption>{label}</figcaption>")
+	parts.append("</figure>")
+	return "".join(parts)
 
 
 def _discover_bug_figures(analysis_dir: str, report_path: str) -> List[Tuple[str, str]]:
@@ -286,7 +349,7 @@ def _discover_bug_figures(analysis_dir: str, report_path: str) -> List[Tuple[str
 	png_files = sorted(Path(analysis_dir).glob("*.png"))
 	for png in png_files:
 		name = png.name
-		if name.startswith("coverage_") or name.startswith("mean_coverage_"):
+		if name.startswith("coverage_") or name.startswith("mean_coverage_") or name.startswith("mann_whitney"):
 			continue
 		caption = name.replace("_", " ").rsplit(".", 1)[0].title()
 		figures.append((_rel_path(str(png), report_path), caption))
@@ -297,7 +360,7 @@ def _build_benchmark_table(config: Dict[str, Any]) -> str:
 	target_name = config.get("target_name", "unknown")
 	duration = config.get("timeout", "unknown")
 	trials = config.get("campaigns", "unknown")
-	corpus_size = config.get("corpus_size") or "N/A"
+
 	dict_present = "Yes" if config.get("dict") else "No"
 
 	job_entries = []
@@ -306,7 +369,9 @@ def _build_benchmark_table(config: Dict[str, Any]) -> str:
 		jobs = details.get("jobs")
 		if jobs is None:
 			binaries = details.get("binaries") or []
+			print(binaries)
 			jobs = len(binaries) if binaries else "?"
+			print(f"[DEBUG] Jobs={jobs}")
 		job_entries.append(f"{_format_fuzzer_name(name)}={jobs}")
 	jobs_value = ", ".join(job_entries) if job_entries else "N/A"
 
@@ -315,7 +380,6 @@ def _build_benchmark_table(config: Dict[str, Any]) -> str:
 		("Target name", target_name),
 		("Duration", duration),
 		("Trials", trials),
-		("Corpus size", corpus_size),
 		("Dict", dict_present),
 		("Jobs per trial", jobs_value),
 	]
@@ -393,24 +457,80 @@ def generate_report(
 	fuzzer_names = _list_fuzzers(config, bug_summary)
 	fuzzer_list_html = _render_list(fuzzer_names, "No fuzzers configured.")
 
-	coverage_table_html = _render_coverage_table(coverage_summary)
+	coverage_normal_table = _render_coverage_table(
+		coverage_summary,
+		lambda key: _infer_build_type(key) == "Normal",
+	)
+	coverage_asan_table = _render_coverage_table(
+		coverage_summary,
+		lambda key: _infer_build_type(key) == "ASAN",
+	)
 
-	coverage_figures = _collect_figures(
+	coverage_normal_growth = _render_single_figure(
 		analysis_dir,
-		[
-			("coverage_growth_normal.png", "Coverage growth (Normal)"),
-			("coverage_growth_asan.png", "Coverage growth (ASAN)"),
-			("coverage_violin_plot.png", "Coverage violin plot"),
-			("coverage_boxplot.png", "Coverage boxplot"),
-			("mean_coverage_histogram_normal.png", "Mean coverage histogram (Normal)"),
-			("mean_coverage_histogram_asan.png", "Mean coverage histogram (ASAN)"),
-		],
+		"coverage_growth_normal.png",
+		"Coverage growth (Normal)",
 		output_path,
 	)
-	coverage_figures_html = _render_figure_grid(coverage_figures)
+	coverage_normal_violin = _render_single_figure(
+		analysis_dir,
+		"coverage_violin_normal.png",
+		"Coverage distribution (Normal)",
+		output_path,
+	)
+	coverage_normal_mean = _render_single_figure(
+		analysis_dir,
+		"mean_coverage_histogram_normal.png",
+		"Mean coverage histogram (Normal)",
+		output_path,
+	)
+	coverage_normal_pairwise = _render_single_figure(
+		analysis_dir,
+		"coverage_pairwise_heatmap_normal.png",
+		"Pairwise coverage heatmap (Normal)",
+		output_path,
+	)
+	coverage_normal_stats_heatmap = _render_single_figure(
+		analysis_dir,
+		"mann_whitney_heatmap_normal.png",
+		"Mann-Whitney U heatmap (Normal)",
+		output_path,
+	)
+	coverage_asan_growth = _render_single_figure(
+		analysis_dir,
+		"coverage_growth_asan.png",
+		"Coverage growth (ASAN)",
+		output_path,
+	)
+	coverage_asan_mean = _render_single_figure(
+		analysis_dir,
+		"mean_coverage_histogram_asan.png",
+		"Mean coverage histogram (ASAN)",
+		output_path,
+	)
+	coverage_asan_violin = _render_single_figure(
+		analysis_dir,
+		"coverage_violin_asan.png",
+		"Coverage distribution (ASAN)",
+		output_path,
+	)
+	coverage_asan_pairwise = _render_single_figure(
+		analysis_dir,
+		"coverage_pairwise_heatmap_asan.png",
+		"Pairwise coverage heatmap (ASAN)",
+		output_path,
+	)
+	coverage_asan_stats_heatmap = _render_single_figure(
+		analysis_dir,
+		"mann_whitney_heatmap_asan.png",
+		"Mann-Whitney U heatmap (ASAN)",
+		output_path,
+	)
 
-	coverage_stats_note_html = coverage_stats_notes or '<p class="placeholder">TBD: Statistical tests</p>'
-	coverage_pairwise_note_html = coverage_pairwise_notes or '<p class="placeholder">TBD: Pairwise coverage</p>'
+	coverage_stats_note_html = _compose_stats_notes(
+		coverage_stats_notes,
+		coverage_pairwise_notes
+	)
 
 	ordered_tools = _ordered_tools(config, bug_summary)
 	bug_matrix_html = _render_bug_matrix(bug_summary, ordered_tools)
@@ -423,10 +543,19 @@ def generate_report(
 		"generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
 		"benchmark_table": benchmark_table,
 		"fuzzer_list": fuzzer_list_html,
-		"coverage_stats_table": coverage_table_html,
-		"coverage_figures": coverage_figures_html,
+		"coverage_normal_table": coverage_normal_table,
+		"coverage_asan_table": coverage_asan_table,
+		"coverage_normal_growth": coverage_normal_growth,
+		"coverage_normal_mean": coverage_normal_mean,
+		"coverage_normal_violin": coverage_normal_violin,
+		"coverage_normal_pairwise": coverage_normal_pairwise,
+		"coverage_normal_stats_heatmap": coverage_normal_stats_heatmap,
+		"coverage_asan_growth": coverage_asan_growth,
+		"coverage_asan_mean": coverage_asan_mean,
+		"coverage_asan_violin": coverage_asan_violin,
+		"coverage_asan_pairwise": coverage_asan_pairwise,
+		"coverage_asan_stats_heatmap": coverage_asan_stats_heatmap,
 		"coverage_stats_notes": coverage_stats_note_html,
-		"coverage_pairwise_notes": coverage_pairwise_note_html,
 		"bug_matrix_table": bug_matrix_html,
 		"bug_figures": bug_figures_html,
 		"bug_details": bug_details_html,
@@ -439,34 +568,3 @@ def generate_report(
 	return output_path
 
 
-def _parse_args() -> argparse.Namespace:
-	parser = argparse.ArgumentParser(description="Generate fuzzing HTML reports.")
-	parser.add_argument("--config", required=True, help="Benchmark configuration YAML")
-	parser.add_argument("--analysis-dir", help="Directory containing analysis outputs")
-	parser.add_argument("--coverage-json", help="Path to coverage summary JSON")
-	parser.add_argument("--bug-json", help="Path to bug summary JSON")
-	parser.add_argument("--template", help="Custom HTML template path")
-	parser.add_argument("--output", help="Target HTML path")
-	parser.add_argument("--coverage-notes", help="Override statistical tests note")
-	parser.add_argument("--pairwise-notes", help="Override pairwise coverage note")
-	return parser.parse_args()
-
-
-def _cli() -> int:
-	args = _parse_args()
-	generate_report(
-		config_path=args.config,
-		analysis_dir=args.analysis_dir,
-		coverage_json_path=args.coverage_json,
-		bug_json_path=args.bug_json,
-		template_path=args.template,
-		output_path=args.output,
-		coverage_stats_notes=args.coverage_notes,
-		coverage_pairwise_notes=args.pairwise_notes,
-	)
-	print("[+] Report generated.")
-	return 0
-
-
-if __name__ == "__main__":
-	raise SystemExit(_cli())

@@ -1,13 +1,9 @@
 import os
-import multiprocessing
-import subprocess
 import yaml
-from time import sleep
-from datetime import datetime, timedelta
+from datetime import timedelta
 import sched
 import time
-from typing import List
-from pathlib import Path
+from typing import List, Dict
 from runner.run_fuzz import (
     run_fuzzing_session,
     is_asan,
@@ -33,13 +29,6 @@ class Fuzzer:
         self.out_root = os.path.abspath(out_root)
 
 
-class Benchmark:
-    def __init__(self, target_name: str, input_path: str, timeout: int, campaigns: int, fuzzers: List[Fuzzer]):
-        self.target_name = target_name
-        self.input_path = input_path
-        self.timeout = timeout
-        self.campaigns = campaigns
-        self.fuzzers = fuzzers
 
 
 def get_fuzzer_output_locations(config: dict, base_output_dir: str, fuzzer_objs: List):
@@ -66,6 +55,26 @@ def get_fuzzer_output_locations(config: dict, base_output_dir: str, fuzzer_objs:
         }
 
     return locations
+
+
+def load_env_file(env_path: str) -> Dict[str, str]:
+    env_vars: Dict[str, str] = {}
+    with open(env_path, 'r') as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('export '):
+                line = line[len('export '):]
+            key, sep, value = line.partition('=')
+            if not sep:
+                continue
+            key = key.strip()
+            value = value.strip()
+            if value and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            env_vars[key] = value
+    return env_vars
 
 
 
@@ -106,8 +115,6 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
                 f.set_concolic_bins(con_bins if isinstance(con_bins, list) else [con_bins])
         fuzzer_objs.append((f, fuzzer_config))
 
-    benchmark = Benchmark(config['target_name'], config['input_corpora'], config['timeout'], campaigns, [f for f, _ in fuzzer_objs])
-
     locations = get_fuzzer_output_locations(config, base_output_dir, fuzzer_objs)
     print("\n[+] Fuzzer output locations summary:")
     for fname, desc in locations.items():
@@ -135,7 +142,19 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
 
         concolic = fuzzer_config.get('concolic')
         concolic_bin = fuzzer_config.get('concolic_bin')
-        env = fuzzer_config.get('env')
+        env_cfg = fuzzer_config.get('env')
+        env_mapping = None
+        if env_cfg:
+            if isinstance(env_cfg, str):
+                env_path = os.path.abspath(env_cfg)
+                try:
+                    env_mapping = load_env_file(env_path)
+                except OSError as e:
+                    raise RuntimeError(f"Failed to read env file '{env_path}' for {fuzzer_name}: {e}") from e
+            elif isinstance(env_cfg, dict):
+                env_mapping = dict(env_cfg)
+            else:
+                raise ValueError(f"Invalid env configuration for {fuzzer_name}: expected path or mapping, got {type(env_cfg).__name__}")
 
         if concolic and not concolic_bin:
             print(f"[!] Warning: Concolic execution specified for {fuzzer_name} but no binary provided")
@@ -161,7 +180,7 @@ def schedule_fuzzing_jobs(config_path, output_dir, dry_run: bool = False):
                 'dictionary': config.get('dict'),
                 'concolic': concolic,
                 'concolic_bin': concolic_bin,
-                'env':env
+                'env': env_mapping
             }
         )
 
@@ -183,6 +202,7 @@ def main():
     parser.add_argument("--run-bugs", action="store_true", help="Run bug analysis after scheduling (uses 'oracle_binary' from config)")
     parser.add_argument("--run-coverage", action="store_true", help="Run coverage analysis after scheduling (uses 'coverage_binary' from config)")
     parser.add_argument("--analysis-output", help="Directory where analysis outputs (plots, JSON) will be written", default=None)
+    parser.add_argument("--no-setup", action="store_true", help="Skip modifying system crash/ASLR settings")
     args = parser.parse_args()
 
     if not os.path.exists(args.config):
@@ -196,7 +216,7 @@ def main():
         print(f"[!] Failed to read config: {e}")
         cfg = {}
 
-    setup_system(False)
+    setup_system(args.no_setup)
     try:
         locations = schedule_fuzzing_jobs(args.config, args.output, dry_run=args.dry_run)
     except Exception as e:
@@ -245,14 +265,19 @@ def main():
             print("[!] --run-coverage requires 'coverage_binary' to be set in the config file")
         else:
             os.makedirs(analysis_out, exist_ok=True)
-            fuzzer_dirs = [d['out_root'] for d in locations.values()]
+            fuzzer_dirs = []
+            for fuzzer, corpora in locations.items():
+                if fuzzer.lower() == "libfuzzer":
+                    fuzzer_dirs.append(cfg.get("input_corpora"))
+                else:
+                    fuzzer_dirs.append(corpora['out_root'])
             timeout_seconds = parse_duration(cfg.get("timeout"))
             coverage_res = cov.run_cov_analysis(coverage_bin, fuzzer_dirs, analysis_out,cfg.get("target_name"),timeout_seconds)
-
+    print(coverage_res)
     os.makedirs(analysis_out, exist_ok=True)
     target_label = (cfg.get('target_name') or 'benchmark').replace(' ', '_')
     safe_name = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in target_label)
-    report_path = os.path.join(args.analysis_output, f"{safe_name}_report.html")
+    report_path = os.path.join(analysis_out, f"{safe_name}_report.html")
     try:
         generate_report(
             config_path=args.config,

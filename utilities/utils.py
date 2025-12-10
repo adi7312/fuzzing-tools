@@ -1,3 +1,5 @@
+import os
+
 def parse_duration(duration_str):
     """Convert duration string like '12h' or '1d' to seconds."""
     unit = duration_str[-1]
@@ -10,3 +12,16 @@ def parse_duration(duration_str):
         return value * 60
     else:
         raise ValueError(f"Unsupported duration unit: {unit}")
+    
+def format_fuzzer_name(dir_name):
+    print(f"Trying to converse: {dir_name}")
+    name_map = {"symcc_aflpp": "SYMCC+AFL", "aflpp": "AFL++",  "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
+    base_name = os.path.basename(dir_name)
+    print(f"Base name: {base_name}")
+    print(base_name)
+    for key, formatted_name in name_map.items():
+        if key in base_name.lower():
+            print(f"Formatted: {formatted_name}")
+            return formatted_name
+    
+    return base_name.replace('_out', '').replace('_', ' ').title()

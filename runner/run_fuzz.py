@@ -3,6 +3,8 @@ import os
 import subprocess
 import multiprocessing
 from elftools.elf.elffile import ELFFile
+from time import time, sleep
+import yaml
 
 
 def abspath_if_not_none(path):
@@ -22,11 +24,8 @@ def setup_system(no_setup):
 def make_dir(path):
     os.makedirs(path, exist_ok=True)
 
-def launch_cmd_in_screen(session_name, cmd, cwd=None):
-    if cwd:
-        wrapped = f"bash -lc 'cd \"{cwd}\" && {cmd}"
-    else:
-        wrapped = f"bash -lc '{cmd}'"
+def launch_cmd_in_screen(session_name, cmd):
+    wrapped = f"bash -lc '{cmd}'"
     screen_cmd = f"screen -dmS {session_name} {wrapped}"
     print(f"[+] screen session: {session_name} -> {cmd}")
     subprocess.run(screen_cmd, shell=True, check=False)
@@ -125,6 +124,18 @@ def is_asan(binary_path):
     return False
 
 
+from time import time
+
+def create_fuzzer_conf_file(fuzzer_name, output_dir):
+    campaign_start = int(time())
+    data = {
+        "fuzzer_name": fuzzer_name,
+        "start_time": campaign_start,
+    }
+    with open(f"{output_dir}/fuzzer_config.yaml", "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=False)
+
+    
 
 from time import sleep
 
@@ -147,6 +158,11 @@ def run_fuzzing_session(
     total_cores = multiprocessing.cpu_count()
     core_id = start_core
     is_concolic = concolic in ['symcc', 'fuzzolic']
+
+    env_vars = None
+    if env:
+        env_vars = os.environ.copy()
+        env_vars.update(env)
     
     if (is_concolic and not concolic_bin):
         raise Exception("Concolic execution enabled but no binary was provided")
@@ -156,7 +172,7 @@ def run_fuzzing_session(
         targets = [targets]
     if not targets:
         raise ValueError("At least one target binary must be provided")
-
+    
     for cluster in range(1, clusters + 1):
         for job in range(1, jobs + 1):
             fuzz_name = f"fuzz{job:02d}"
@@ -181,7 +197,8 @@ def run_fuzzing_session(
                     timeout=timeout,
                     session_name=session_name,
                     dictionary=dictionary,
-                    workspace=cluster_top_dir
+                    workspace=cluster_top_dir,
+                    env=env_vars
                 )
             elif fuzzer_type == 'libfuzzer':
                 cluster_dir = os.path.join(output_dir, f"c{cluster}", fuzz_name)
@@ -198,7 +215,8 @@ def run_fuzzing_session(
                     target=target,
                     timeout=timeout,
                     session_name=session_name,
-                    dictionary=dictionary
+                    dictionary=dictionary,
+                    env=env_vars
                 )
             elif fuzzer_type in ['afl', 'aflpp']:
                 is_aflpp = fuzzer_type == 'aflpp'
@@ -216,6 +234,7 @@ def run_fuzzing_session(
                     dictionary=dictionary,
                     is_main=is_main,
                     is_aflpp=is_aflpp,
+                    env=env_vars
                 )
             core_id += 1
             if concolic == 'symcc' and fuzzer_type in ['afl','aflpp'] and job == jobs:
@@ -228,13 +247,15 @@ def run_fuzzing_session(
                     concolic_bin=concolic_bin,
                     session_name=session_name,
                     timeout=timeout,
-                    output_dir=output_dir_cluster
+                    output_dir=output_dir_cluster,
+                    env=env_vars
                 )
                 core_id += 1
-
+    
     print("\n[*] All fuzzing jobs launched in screen sessions.")
     print("    List sessions with:  screen -ls")
     print("    Attach with:         screen -r <session_name>")
+    create_fuzzer_conf_file(fuzzer_type, output_dir)
 
 
 def main():
@@ -253,6 +274,7 @@ def main():
     parser.add_argument("--concolic-bin", help="Path to symbolicaly instrumented binary")
 
     args = parser.parse_args()
+    setup_system(args.no_setup)
     run_fuzzing_session(
         fuzzer_type=args.fuzzer,
         targets=[os.path.abspath(t) for t in args.targets],
@@ -264,8 +286,7 @@ def main():
         start_core=args.start_core,
         dictionary=args.dict,
         concolic=args.concolic,
-        concolic_bin=args.concolic_bin,
-        no_setup=args.no_setup
+        concolic_bin=args.concolic_bin
     )
 
 

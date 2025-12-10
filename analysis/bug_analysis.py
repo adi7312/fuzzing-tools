@@ -4,12 +4,11 @@ import hashlib
 import subprocess
 import os
 import matplotlib.pyplot as plt
-from collections import defaultdict
 from statistics import mean 
+import yaml
 
+from analysis.visuals.bug_visualization import plot_summary
 from analysis.parse.parse_asan import parse_asan
-from analysis.parse.parse_afl import get_start_time as get_start_time_afl
-from analysis.parse.parse_hfuzz import get_start_time as get_start_time_hfuzz
 
 class Bug:
     def __init__(self, signature: str, error_type: str):
@@ -47,10 +46,6 @@ class BugBucket:
     def items(self):
         return self._bugs.items()
 
-def s_to_hm(timestamp: int):
-    h = timestamp // 3600
-    m = (timestamp % 3600) // 60
-    return f"{h}:{m:02d}"
 
 def _extract_fuzzer_id(crash_file_path: str, fuzz_dir: str) -> str:
     rel = os.path.relpath(os.path.dirname(crash_file_path), fuzz_dir)
@@ -156,8 +151,8 @@ def _summarize_results(tool_buckets: Dict[str, BugBucket], tool_totals: Dict[str
                 'total_fuzzers': total,
                 'effectiveness': eff,
                 'found_in': sorted(list(bug.found_in.keys())),
-                'mean_tte': s_to_hm(mean(sorted(list(bug.found_in.values())))),
-                'min_tte': s_to_hm(min(list(bug.found_in.values())))
+                'mean_tte': mean(sorted(list(bug.found_in.values()))),
+                'min_tte': min(list(bug.found_in.values()))
             })
         result[tool_name] = {
             'total_fuzzers': total,
@@ -166,90 +161,21 @@ def _summarize_results(tool_buckets: Dict[str, BugBucket], tool_totals: Dict[str
     return result
 
 
-def plot_summary(summary: Dict[str, Any], out_dir: str = '.') -> None:
 
-    os.makedirs(out_dir, exist_ok=True)
 
-    # Build a consistent color map across error types
-    global_error_types = set()
-    for data in summary.values():
-        for b in data.get('bugs', []):
-            global_error_types.add(b.get('error_type', 'unknown'))
-
-    sorted_errors = sorted(global_error_types)
-    cmap = plt.get_cmap('tab20')
-    color_map = {err: cmap(i % cmap.N) for i, err in enumerate(sorted_errors)}
-
-    # Per-tool pie charts
-    for tool_name, data in summary.items():
-        counts = defaultdict(int)
-        for b in data.get('bugs', []):
-            counts[b.get('error_type', 'unknown')] += 1
-
-        if not counts:
-            continue
-
-        labels = list(counts.keys())
-        sizes = [counts[k] for k in labels]
-        colors = [color_map.get(l, (0.6, 0.6, 0.6)) for l in labels]
-
-        plt.figure(figsize=(6, 6))
-        plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
-        plt.axis('equal')
-        plt.title(f"{tool_name} - unique bugs by error type")
-        outpath = os.path.join(out_dir, f"{tool_name.replace(' ', '_')}_pie.png")
-        plt.tight_layout()
-        plt.savefig(outpath)
-        plt.close()
-        print(f"[+] Saved pie chart: {outpath}")
-
-    # Overall pie across all tools
-    global_counts = defaultdict(int)
-    for data in summary.values():
-        for b in data.get('bugs', []):
-            global_counts[b.get('error_type', 'unknown')] += 1
-
-    if global_counts:
-        labels = list(global_counts.keys())
-        sizes = [global_counts[k] for k in labels]
-        colors = [color_map.get(l, (0.6, 0.6, 0.6)) for l in labels]
-        plt.figure(figsize=(7, 7))
-        plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
-        plt.axis('equal')
-        plt.title("All tools - unique bugs by error type")
-        outpath = os.path.join(out_dir, "all_tools_pie.png")
-        plt.tight_layout()
-        plt.savefig(outpath)
-        plt.close()
-        print(f"[+] Saved overall pie chart: {outpath}")
-
-    tools = []
-    counts = []
-    for tool_name, data in summary.items():
-        tools.append(tool_name)
-        counts.append(len(data.get('bugs', [])))
-
-    if tools:
-        plt.figure(figsize=(max(6, len(tools)), 6))
-        bars = plt.bar(tools, counts, color='tab:blue')
-        plt.ylabel('Unique bug signatures')
-        plt.title('Number of unique bugs per fuzzer')
-        plt.xticks(rotation=45, ha='right')
-        for bar, cnt in zip(bars, counts):
-            plt.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(), str(cnt), ha='center', va='bottom')
-        plt.tight_layout()
-        outpath = os.path.join(out_dir, 'bugs_per_fuzzer_hist.png')
-        plt.savefig(outpath)
-        plt.close()
-        print(f"[+] Saved histogram: {outpath}")
+def _get_start_time_from_config(fuzz_dir):
+    with open(f"{fuzz_dir}/fuzzer_config.yaml", "r") as f:
+        cfg = yaml.safe_load(f)
+        print(f"[DEBUG] Start time for {fuzz_dir} is {cfg.get("start_time")}")
+        return cfg.get("start_time")
 
 def _get_start_time_universal(fuzz_dir):
     try:
+        return _get_start_time_from_config(fuzz_dir)
+    except Exception:
         return int(os.path.getctime(fuzz_dir))
-    except OSError:
-        return 0
 
-def _determine_start_time(fuzz_dir, toolname) -> int:
+def _determine_start_time(fuzz_dir) -> int:
     return _get_start_time_universal(fuzz_dir)
  
 
@@ -260,7 +186,7 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
 
     for fuzz_dir in fuzzing_output_dirs:
         tool_name = format_fuzzer_name(fuzz_dir)
-        start_time_val = _determine_start_time(fuzz_dir, tool_name)
+        start_time_val = _determine_start_time(fuzz_dir)
         start_time = int(start_time_val) if start_time_val is not None else 0
         tool_buckets.setdefault(tool_name, BugBucket(start_time=start_time))
         tool_totals[tool_name] = tool_totals.get(tool_name, 0) + _count_expected_fuzzers(fuzz_dir)
@@ -269,6 +195,7 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
             analyzed = _analyze_crash(crash_file_path, fuzz_dir, tool_name, asan_binary_path, llvm_instr)
             if analyzed:
                 bucket = tool_buckets[tool_name]
+                print(f"[DEBUG] TTE DIFF for {tool_name} (TTE-START_TIME)={analyzed['tte']-start_time}")
                 bug = bucket.add(analyzed['signature'], analyzed['error_type'], analyzed['fuzzer_id'], analyzed['tte']-start_time)
                 bug.set_stack_if_missing(analyzed['functions'])
 
