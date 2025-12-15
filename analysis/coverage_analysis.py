@@ -91,6 +91,10 @@ def copy_files_parallel(files, dest_dir):
 def analyze_coverage_growth_in_time(binary_path, fuzzer_out_dir, time_limit):
     print(f"[*] Analyzing coverage growth for {fuzzer_out_dir}...")
     print(f"d1: {fuzzer_out_dir}")
+    if(fuzzer_out_dir[-1] == '/'):
+        tmp = list(fuzzer_out_dir)
+        tmp[-1] = ''
+        fuzzer_out_dir = ''.join(list(tmp))
     fuzzer_name = format_fuzzer_name(fuzzer_out_dir)
     print(f"Fuzzer name: {fuzzer_name}")
     campaign_results = defaultdict(list)
@@ -150,7 +154,6 @@ def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
         fuzzer_out_dir = ''.join(list(tmp))
     fuzzer_name = format_fuzzer_name(fuzzer_out_dir)
 
-    # Directory structure: fuzzer_name_out/c{campain_id}/fuzzer{id}
     campaign_dirs = sorted(
         [d for d in os.listdir(fuzzer_out_dir) if d.startswith('c') and os.path.isdir(os.path.join(fuzzer_out_dir, d))],
         key=lambda d: int(d[1:])

@@ -14,8 +14,12 @@ def parse_duration(duration_str):
         raise ValueError(f"Unsupported duration unit: {unit}")
     
 def format_fuzzer_name(dir_name):
+    if(dir_name[-1] == '/'):
+        tmp = list(dir_name)
+        tmp[-1] = ''
+        dir_name = ''.join(list(tmp))
     print(f"Trying to converse: {dir_name}")
-    name_map = {"symcc_aflpp": "SYMCC+AFL", "aflpp": "AFL++",  "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
+    name_map = {"symcc_aflpp": "SYMCC & AFL++", "aflpp": "AFL++",  "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
     base_name = os.path.basename(dir_name)
     print(f"Base name: {base_name}")
     print(base_name)

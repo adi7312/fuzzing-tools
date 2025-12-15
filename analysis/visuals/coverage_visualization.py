@@ -192,7 +192,6 @@ def plot_histogram(data, output_dir, plot_title):
         print("  [!] No data to plot.")
         return
 
-    # Separate data into Normal and ASAN
     normal_data = {k: v for k, v in data.items() if 'fuzz01' in k}
     asan_data = {k: v for k, v in data.items() if 'fuzz02' in k}
 

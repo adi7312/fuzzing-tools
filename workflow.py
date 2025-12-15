@@ -278,17 +278,16 @@ def main():
     target_label = (cfg.get('target_name') or 'benchmark').replace(' ', '_')
     safe_name = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in target_label)
     report_path = os.path.join(analysis_out, f"{safe_name}_report.html")
-    try:
-        generate_report(
-            config_path=args.config,
-            analysis_dir=analysis_out,
-            coverage_summary=coverage_res or None,
-            bug_summary=bug_res or None,
-            output_path=report_path,
-        )
-        print(f"[+] Report generated at {report_path}")
-    except Exception as e:
-        print(f"[!] Failed to generate report: {e}")
+
+    generate_report(
+        config_path=args.config,
+        analysis_dir=analysis_out,
+        coverage_summary=coverage_res or None,
+        bug_summary=bug_res or None,
+        output_path=report_path,
+    )
+    print(f"[+] Report generated at {report_path}")
+
 
 
 if __name__ == "__main__":

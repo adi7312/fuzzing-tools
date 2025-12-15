@@ -5,7 +5,7 @@ def parse_asan(log_text: str):
     access_re = re.compile(r"(?P<access>READ|WRITE) of size (?P<size>\d+)")
     frame_line_re = re.compile(
         r"^\s*#(?P<num>\d+)\s+(?P<pc>0x[0-9a-fA-F]+)\s+in\s+(?P<func>[^\s]+)"
-        r"(?:\s+(?P<file>[^:]+):(?P<line>\d+)(?::(?P<col>\d+))?)?",
+        r"(?:\s+(?P<file>[^\n:]+):(?P<line>\d+)(?::(?P<col>\d+))?)?",
         re.MULTILINE
     )
     summary_re = re.compile(
@@ -43,7 +43,7 @@ def parse_asan(log_text: str):
             "frame": int(m.group("num")),
             "pc": m.group("pc"),
             "function": m.group("func"),
-            "file": m.group("file") or "",
+            "file": (m.group("file") or "").strip(),
             "line": int(m.group("line")) if m.group("line") else None,
             "col": int(m.group("col")) if m.group("col") else None,
         }

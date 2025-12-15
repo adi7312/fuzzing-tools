@@ -9,6 +9,8 @@ import yaml
 
 from analysis.visuals.bug_visualization import plot_summary
 from analysis.parse.parse_asan import parse_asan
+from utilities.utils import format_fuzzer_name
+
 
 class Bug:
     def __init__(self, signature: str, error_type: str):
@@ -100,6 +102,7 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
             print(f"[DEBUG] Executing: {asan_binary_path} {crash_file_path}")
             result = subprocess.run([asan_binary_path, crash_file_path], stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=3)
         else:
+            print(f"Running: {asan_binary_path} < {crash_file_path}")
             with open(crash_file_path, "rb") as fh:
                 result = subprocess.run([asan_binary_path], stdin=fh, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=3)
 
@@ -121,6 +124,7 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
                 }
             
     except (subprocess.TimeoutExpired) as e:
+        print("Got timeout")
         tte = os.path.getmtime(crash_file_path)
         fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
         return {
@@ -140,7 +144,7 @@ def _summarize_results(tool_buckets: Dict[str, BugBucket], tool_totals: Dict[str
     for tool_name, bucket in tool_buckets.items():
         total = tool_totals.get(tool_name, 0) or 0
         bugs_summary = []
-        for signature, bug in bucket.items():
+        for _, bug in bucket.items():
             cnt = bug.count()
             eff = cnt / total if total > 0 else 0.0
             bugs_summary.append({
@@ -166,7 +170,6 @@ def _summarize_results(tool_buckets: Dict[str, BugBucket], tool_totals: Dict[str
 def _get_start_time_from_config(fuzz_dir):
     with open(f"{fuzz_dir}/fuzzer_config.yaml", "r") as f:
         cfg = yaml.safe_load(f)
-        print(f"[DEBUG] Start time for {fuzz_dir} is {cfg.get("start_time")}")
         return cfg.get("start_time")
 
 def _get_start_time_universal(fuzz_dir):
@@ -175,8 +178,6 @@ def _get_start_time_universal(fuzz_dir):
     except Exception:
         return int(os.path.getctime(fuzz_dir))
 
-def _determine_start_time(fuzz_dir) -> int:
-    return _get_start_time_universal(fuzz_dir)
  
 
 def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_instr=False):
@@ -186,7 +187,8 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
 
     for fuzz_dir in fuzzing_output_dirs:
         tool_name = format_fuzzer_name(fuzz_dir)
-        start_time_val = _determine_start_time(fuzz_dir)
+        print(f"[*][BUG] Testing: {tool_name}")
+        start_time_val = _get_start_time_universal(fuzz_dir)
         start_time = int(start_time_val) if start_time_val is not None else 0
         tool_buckets.setdefault(tool_name, BugBucket(start_time=start_time))
         tool_totals[tool_name] = tool_totals.get(tool_name, 0) + _count_expected_fuzzers(fuzz_dir)
@@ -195,7 +197,6 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
             analyzed = _analyze_crash(crash_file_path, fuzz_dir, tool_name, asan_binary_path, llvm_instr)
             if analyzed:
                 bucket = tool_buckets[tool_name]
-                print(f"[DEBUG] TTE DIFF for {tool_name} (TTE-START_TIME)={analyzed['tte']-start_time}")
                 bug = bucket.add(analyzed['signature'], analyzed['error_type'], analyzed['fuzzer_id'], analyzed['tte']-start_time)
                 bug.set_stack_if_missing(analyzed['functions'])
 
@@ -204,12 +205,22 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
 
 
 
-def get_source_functions(parsed_asan: Dict) -> List:
+def get_source_functions(parsed_asan: Dict) -> List[Dict[str, Any]]:
     src_frames = parsed_asan["source_frames"]
-    functions = []
+    functions: List[Dict[str, Any]] = []
     for frame in src_frames:
-        if not frame['function'].startswith("__"):
-            functions.append((frame['function'],frame['line']))
+        line = frame.get('line')
+        if line is None:
+            continue
+        func_name = frame.get('function', '')
+        if func_name.startswith("__"):
+            continue
+        file_path = frame.get('file') or "unknown"
+        functions.append({
+            "function": func_name,
+            "line": line,
+            "file": file_path,
+        })
     return functions
 
 def get_error_type(parsed_asan: Dict) -> str:
@@ -217,20 +228,17 @@ def get_error_type(parsed_asan: Dict) -> str:
 
 
 
-def get_stack_signature(function_stack: List, error_type: str):
-    func_str = f"{function_stack[0][0]}{function_stack[0][1]}{error_type}"
-    for i in range(1,len(function_stack)):
-        func_str += function_stack[i][0]
-    hash_object = hashlib.sha1(func_str.encode("utf-8"))
-    return hash_object.hexdigest()
-
-def format_fuzzer_name(dir_name):
-    name_map = {"symcc_aflpp": "SYMCC & AFL++", "aflpp": "AFL++", "symcc_afl": "SYMCC & AFL", "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
-    base_name = os.path.basename(dir_name)
-    for key, formatted_name in name_map.items():
-        if key in base_name.lower():
-            return formatted_name
-    return base_name.replace('_out', '').replace('_', ' ').title()
+def get_stack_signature(function_stack: List[Dict[str, Any]], error_type: str) -> str:
+    signature_parts = [error_type]
+    for frame in function_stack:
+        func = frame.get('function') or ''
+        file_path = frame.get('file') or ''
+        line = frame.get('line')
+        line_str = str(line) if line is not None else ''
+        signature_parts.append(f"{func}|{file_path}|{line_str}")
+    digest_source = "||".join(signature_parts)
+    print(digest_source)
+    return hashlib.sha1(digest_source.encode('utf-8')).hexdigest()
 
 
 import argparse

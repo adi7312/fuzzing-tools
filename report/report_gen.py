@@ -202,23 +202,11 @@ def _infer_build_type(key: str) -> str:
 	return "Normal"
 
 
-def _compose_stats_notes(
-	stats_note: Optional[str],
-	pairwise_note: Optional[str],
-) -> str:
-	stats_html = stats_note or '<p class="placeholder">TBD: Statistical tests</p>'
-	pair_html = pairwise_note or '<p class="placeholder">TBD: Pairwise coverage</p>'
-	return (
-		'<div class="stat-grid">'
-		f'<div><h4>Statistical tests</h4>{stats_html}</div>'
-		f'<div><h4>Pairwise coverage</h4>{pair_html}</div>'
-		'</div>'
-	)
-
 
 def _collect_bug_details(bug_summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 	details: Dict[str, Dict[str, Any]] = {}
 	for tool_name, tool_data in bug_summary.items():
+		formatted_tool = _format_fuzzer_name(tool_name)
 		bugs = tool_data.get("bugs") or []
 		for bug in bugs:
 			signature = bug.get("signature") or "unknown"
@@ -230,13 +218,16 @@ def _collect_bug_details(bug_summary: Dict[str, Any]) -> Dict[str, Dict[str, Any
 					"per_tool": {},
 				},
 			)
-			record["per_tool"][tool_name] = {
+			entry = {
 				"count": bug.get("count", 0),
 				"effectiveness": bug.get("effectiveness"),
 				"min_tte": bug.get("min_tte"),
 				"mean_tte": bug.get("mean_tte"),
 				"max_tte": bug.get("max_tte"),
 			}
+			record["per_tool"][tool_name] = entry
+			if formatted_tool != tool_name:
+				record["per_tool"][formatted_tool] = entry
 	return details
 
 
@@ -250,6 +241,7 @@ def _render_bug_matrix(bug_summary: Dict[str, Any], ordered_tools: Sequence[str]
 	for signature, data in sorted(bugs.items()):
 		label = f"{signature[:12]}:{data['error_type']}"
 		row = [label]
+		
 		for tool in ordered_tools:
 			row.append("X" if tool in data["per_tool"] else "")
 		rows.append(row)
@@ -265,14 +257,30 @@ def _render_bug_details(bug_summary: Dict[str, Any], ordered_tools: Sequence[str
 	for signature, data in sorted(bugs.items()):
 		error_type = data.get("error_type", "unknown")
 		stack = data.get("stack") or []
-		top_frame = stack[0] if stack else ("unknown", "?")
-		function = top_frame[0] if isinstance(top_frame, (list, tuple)) and top_frame else str(top_frame)
-		line = top_frame[1] if isinstance(top_frame, (list, tuple)) and len(top_frame) > 1 else "?"
-		summary = f"Summary: {error_type} in {function} at line {line}"
+		top_frame = stack[0] if stack else None
+		if isinstance(top_frame, dict):
+			func_name = top_frame.get("function", "unknown")
+			file_path = top_frame.get("file", "unknown")
+			line = top_frame.get("line", "?")
+		elif isinstance(top_frame, (list, tuple)):
+			func_name = top_frame[0] if top_frame else "unknown"
+			line = top_frame[1] if len(top_frame) > 1 else "?"
+			file_path = top_frame[2] if len(top_frame) > 2 else "unknown"
+		else:
+			func_name = str(top_frame) if top_frame is not None else "unknown"
+			file_path = "unknown"
+			line = "?"
+		
+		summary = f"Summary: {error_type} in {func_name} ({file_path}:{line})"
 
 		stack_lines = []
 		for frame in stack:
-			if isinstance(frame, (list, tuple)):
+			if isinstance(frame, dict):
+				frame_fn = frame.get("function", "?")
+				frame_line = frame.get("line", "?")
+				frame_file = frame.get("file", "unknown")
+				stack_lines.append(f"- {frame_fn} ({frame_file}:{frame_line})")
+			elif isinstance(frame, (list, tuple)):
 				frame_fn = frame[0]
 				frame_line = frame[1] if len(frame) > 1 else "?"
 				stack_lines.append(f"- {frame_fn} : {frame_line}")
@@ -407,6 +415,7 @@ def _ordered_tools(config: Dict[str, Any], bug_summary: Dict[str, Any]) -> List[
 		formatted = _format_fuzzer_name(tool)
 		if formatted not in ordered:
 			ordered.append(formatted)
+	print(ordered)
 	return ordered
 
 
@@ -419,8 +428,6 @@ def generate_report(
 	bug_json_path: Optional[str] = None,
 	template_path: Optional[str] = None,
 	output_path: Optional[str] = None,
-	coverage_stats_notes: Optional[str] = None,
-	coverage_pairwise_notes: Optional[str] = None,
 ) -> str:
 
 	config = _load_yaml(config_path)
@@ -527,10 +534,6 @@ def generate_report(
 		output_path,
 	)
 
-	coverage_stats_note_html = _compose_stats_notes(
-		coverage_stats_notes,
-		coverage_pairwise_notes
-	)
 
 	ordered_tools = _ordered_tools(config, bug_summary)
 	bug_matrix_html = _render_bug_matrix(bug_summary, ordered_tools)
@@ -555,7 +558,6 @@ def generate_report(
 		"coverage_asan_violin": coverage_asan_violin,
 		"coverage_asan_pairwise": coverage_asan_pairwise,
 		"coverage_asan_stats_heatmap": coverage_asan_stats_heatmap,
-		"coverage_stats_notes": coverage_stats_note_html,
 		"bug_matrix_table": bug_matrix_html,
 		"bug_figures": bug_figures_html,
 		"bug_details": bug_details_html,
