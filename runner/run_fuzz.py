@@ -166,8 +166,6 @@ def run_fuzzing_session(
     
     if (is_concolic and not concolic_bin):
         raise Exception("Concolic execution enabled but no binary was provided")
-    
-    # ensure targets is a list
     if isinstance(targets, (str, bytes)):
         targets = [targets]
     if not targets:
@@ -176,7 +174,6 @@ def run_fuzzing_session(
     for cluster in range(1, clusters + 1):
         for job in range(1, jobs + 1):
             fuzz_name = f"fuzz{job:02d}"
-            # pick target by cycling through provided binaries
             target = targets[(job - 1) % len(targets)]
             assigned_core = core_id % total_cores
 

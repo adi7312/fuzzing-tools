@@ -19,38 +19,69 @@ from analysis.visuals.coverage_visualization import (
 )
 
 
-def get_coverage(binary_path, corpus_dir):
-    """Run the instrumented binary and get absolute branch coverage."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        profraw_file = os.path.join(temp_dir, "output.profraw")
-        env = os.environ.copy()
-        env["LLVM_PROFILE_FILE"] = profraw_file
+def get_coverage(binary_path, corpus_dir, max_retries: int = 2, base_timeout: int = 6):
+    """Run the instrumented binary and return absolute branch coverage.
 
-        run_cmd = (binary_path, corpus_dir)
-        try:
-            subprocess.run(run_cmd, env=env, check=True, capture_output=True, text=True, timeout=3)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
+    Retries are performed when execution fails or produces zero coverage so that
+    transient timeouts do not silently corrupt the final statistics.
+    """
 
-        if not os.path.exists(profraw_file):
-            return 0
+    def _collect(timeout_secs: int):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profraw_file = os.path.join(temp_dir, "output.profraw")
+            env = os.environ.copy()
+            env["LLVM_PROFILE_FILE"] = profraw_file
 
-        profdata_file = os.path.join(temp_dir, "coverage.profdata")
-        merge_cmd = ["llvm-profdata", "merge", "-sparse", profraw_file, "-o", profdata_file]
-        try:
-            subprocess.run(merge_cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            print(f"  [!] llvm-profdata failed: {e.stderr}")
-            return 0
+            run_cmd = (binary_path, corpus_dir)
+            try:
+                print(f"[ANALYSIS][COVERAGE] Running: {run_cmd[0]} {run_cmd[1]}")
+                subprocess.run(
+                    run_cmd,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_secs,
+                )
+            except subprocess.TimeoutExpired:
+                return 0, f"target execution timed out after {timeout_secs}s"
+            except subprocess.CalledProcessError as exc:
+                return 0, f"target exited with {exc.returncode}"
 
-        cov_cmd = ["llvm-cov", "export", binary_path, f"-instr-profile={profdata_file}", "-summary-only"]
-        try:
-            result = subprocess.run(cov_cmd, check=True, capture_output=True, text=True,timeout=3)
-            cov_data = json.loads(result.stdout)
-            branches_summary = cov_data['data'][0]['totals']['branches']
-            return branches_summary['covered']
-        except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, KeyError) as e:
-            print(f"  [!] Error processing coverage data: {e}")
+            if not os.path.exists(profraw_file):
+                return 0, "no profile generated"
+
+            profdata_file = os.path.join(temp_dir, "coverage.profdata")
+            merge_cmd = ["llvm-profdata", "merge", "-sparse", profraw_file, "-o", profdata_file]
+            try:
+                subprocess.run(merge_cmd, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                return 0, f"llvm-profdata failed ({exc.returncode})"
+
+            cov_cmd = ["llvm-cov", "export", binary_path, f"-instr-profile={profdata_file}", "-summary-only"]
+            try:
+                result = subprocess.run(cov_cmd, check=True, capture_output=True, text=True, timeout=timeout_secs)
+                cov_data = json.loads(result.stdout)
+                branches_summary = cov_data['data'][0]['totals']['branches']
+                covered = branches_summary.get('covered', 0)
+                print(f"[DEBUG][ANALYSIS] Collected branches: {covered}")
+                if covered == 0:
+                    return 0, "llvm-cov reported 0 covered branches"
+                return covered, None
+            except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, KeyError) as exc:
+                return 0, f"llvm-cov export failed: {exc}"
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        timeout_secs = base_timeout * attempt
+        coverage, error = _collect(timeout_secs)
+        if coverage > 0:
+            return coverage
+        last_error = error
+        print(f"  [!] Coverage attempt {attempt} failed for {corpus_dir}: {error}")
+
+    if last_error:
+        print(f"  [!] Giving up on {corpus_dir}: {last_error}")
     return 0
 
 
@@ -77,7 +108,7 @@ def get_time_series(sub_dir, T):
     T_0_filtered = min(filtered_map.keys())
     relative_map = {int(ts) - T_0_filtered: f for ts, f in filtered_map.items()}
     
-    delta = 900
+    delta = 900 # delta T is 15 minutes
     bucketed = defaultdict(list)
     for rel_time, path in relative_map.items():
         bucket_key = (rel_time // delta) * delta
@@ -99,43 +130,74 @@ def analyze_coverage_growth_in_time(binary_path, fuzzer_out_dir, time_limit):
     print(f"Fuzzer name: {fuzzer_name}")
     campaign_results = defaultdict(list)
 
-    campaign_dirs = sorted([d for d in os.listdir(fuzzer_out_dir) if d.startswith('c') and os.path.isdir(os.path.join(fuzzer_out_dir, d))], key=lambda d: int(d[1:]))
+    def _resolve_corpus_path(fuzzer_instance_path: str) -> str | None:
+        corpus_path = next(
+            (os.path.join(fuzzer_instance_path, d) for d in ['queue', 'corpus'] if os.path.isdir(os.path.join(fuzzer_instance_path, d))),
+            None,
+        )
+        if not corpus_path and os.path.isdir(fuzzer_instance_path):
+            if any(os.path.isfile(os.path.join(fuzzer_instance_path, f)) for f in os.listdir(fuzzer_instance_path)):
+                corpus_path = fuzzer_instance_path
+        return corpus_path
 
+    def _process_instance(fuzzer_instance_path: str, fuzzer_instance_dir: str):
+        corpus_path = _resolve_corpus_path(fuzzer_instance_path)
+        if not corpus_path:
+            return None
+
+        time_series_data = get_time_series(corpus_path, time_limit)
+        if not time_series_data:
+            return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            coverage_over_time = {}
+            sorted_buckets = sorted(time_series_data.keys())
+            last_coverage = 0
+
+            for timestamp_bucket in sorted_buckets:
+                files_to_copy = time_series_data[timestamp_bucket]
+                copy_files_parallel(files_to_copy, temp_dir)
+                coverage = get_coverage(binary_path, temp_dir)
+                if coverage < last_coverage:
+                    coverage = last_coverage
+                coverage_over_time[timestamp_bucket] = coverage
+                last_coverage = coverage
+
+            if not coverage_over_time:
+                return None
+
+            df = pd.DataFrame(list(coverage_over_time.items()), columns=['Time', 'Coverage'])
+            fuzzer_id = fuzzer_instance_dir.replace('fuzz', '')
+            return fuzzer_id, df
+
+    campaign_dirs = sorted(
+        [d for d in os.listdir(fuzzer_out_dir) if d.startswith('c') and os.path.isdir(os.path.join(fuzzer_out_dir, d))],
+        key=lambda d: int(d[1:]),
+    )
+
+    instance_jobs = []
     for campaign_dir in campaign_dirs:
         campaign_path = os.path.join(fuzzer_out_dir, campaign_dir)
         for fuzzer_instance_dir in os.listdir(campaign_path):
             if not fuzzer_instance_dir.startswith('fuzz'):
                 continue
-            
             fuzzer_instance_path = os.path.join(campaign_path, fuzzer_instance_dir)
-            corpus_path = next((os.path.join(fuzzer_instance_path, d) for d in ['queue', 'corpus'] if os.path.isdir(os.path.join(fuzzer_instance_path, d))), None)
-            if not corpus_path and os.path.isdir(fuzzer_instance_path) and any(os.path.isfile(os.path.join(fuzzer_instance_path, f)) for f in os.listdir(fuzzer_instance_path)):
-                corpus_path = fuzzer_instance_path
-            if not corpus_path:
-                continue
+            instance_jobs.append((fuzzer_instance_path, fuzzer_instance_dir))
 
-            time_series_data = get_time_series(corpus_path, time_limit)
-            if not time_series_data:
-                continue
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                coverage_over_time = {}
-                sorted_buckets = sorted(time_series_data.keys())
-                last_coverage = 0
-
-                for timestamp_bucket in sorted_buckets:
-                    files_to_copy = time_series_data[timestamp_bucket]
-                    copy_files_parallel(files_to_copy, temp_dir)
-                    coverage = get_coverage(binary_path, temp_dir)
-                    if coverage < last_coverage:
-                        coverage = last_coverage
-                    coverage_over_time[timestamp_bucket] = coverage
-                    last_coverage = coverage
-                
-                if coverage_over_time:
-                    df = pd.DataFrame(list(coverage_over_time.items()), columns=['Time', 'Coverage'])
-                    fuzzer_id = fuzzer_instance_dir.replace('fuzz', '')
-                    campaign_results[fuzzer_id].append(df)
+    if instance_jobs:
+        max_workers = min(4, os.cpu_count() or 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_process_instance, path, inst_dir) for path, inst_dir in instance_jobs]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    print(f"  [!] Coverage growth worker failed: {exc}")
+                    continue
+                if not result:
+                    continue
+                fuzzer_id, df = result
+                campaign_results[fuzzer_id].append(df)
     
     return fuzzer_name, campaign_results
 
@@ -238,6 +300,8 @@ def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
                 print(f"  [!] Error analyzing coverage growth for {fuzzer_dir}: {exc}")
 
     averaged_results = {}
+    expected_limit = time_limit
+    truncated_series = []
     for fuzzer_name, fuzzer_id_data in all_campaign_results.items():
         for fuzzer_id, dfs in fuzzer_id_data.items():
             if not dfs:
@@ -266,9 +330,15 @@ def run_cov_analysis(oracle_binary, directories, output, title, time_limit):
                 final_coverage_over_time[t] = coverage
                 last_coverage = coverage
             
+            last_time = sorted_times[-1] if sorted_times else 0
+            if last_time < expected_limit:
+                truncated_series.append((key, last_time, expected_limit))
             averaged_results[key] = final_coverage_over_time
     print(averaged_results)
-    plot_coverage_growth(averaged_results, output, f"Median Coverage Growth Over Time - {title}")
+    if truncated_series:
+        for label, last_time, limit in truncated_series:
+            print(f"  [!] Warning: {label} coverage trace ends at {last_time/3600:.2f}h (expected {limit/3600:.2f}h).")
+    plot_coverage_growth(averaged_results, output, f"Median Coverage Growth Over Time - {title}", expected_limit=expected_limit)
     print(f"\n[+] Plots and data saved in '{output}'")
     return all_coverage_data
 

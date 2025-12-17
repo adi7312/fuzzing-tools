@@ -133,7 +133,7 @@ def plot_violin(data, output_dir, plot_title):
     do_plot(buckets.get('ASAN'), 'ASAN')
 
 
-def plot_coverage_growth(data, output_dir, plot_title):
+def plot_coverage_growth(data, output_dir, plot_title, expected_limit: int | None = None):
     """Plot coverage growth over time, creating separate plots for ASAN and Normal builds."""
     print("[*] Creating coverage growth plots...")
     if not data:
@@ -155,7 +155,12 @@ def plot_coverage_growth(data, output_dir, plot_title):
             coverage_data = plot_data[fuzzer_name]
             if not coverage_data:
                 continue
-            df = pd.DataFrame(list(coverage_data.items()), columns=['Time', 'Coverage']).sort_values(by='Time')
+            series = sorted(coverage_data.items())
+            if expected_limit is not None and series:
+                last_time, last_cov = series[-1]
+                if last_time < expected_limit:
+                    series.append((expected_limit, last_cov))
+            df = pd.DataFrame(series, columns=['Time', 'Coverage']).sort_values(by='Time')
             # convert seconds to hours for x-axis
             df['TimeHours'] = df['Time'] / 3600.0
             plt.plot(df['TimeHours'], df['Coverage'], linestyle='-', label=fuzzer_name.replace(f' ({build_type})', ''))

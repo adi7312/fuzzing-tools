@@ -60,6 +60,7 @@ void executeSingleTest(const char* path){
 int main(int argc, char* argv[]){
     if (argc < 2){
         fprintf(stderr, "Usage: %s <directory/file>",argv[0]);
+        return 1;
     }
     int entryType = getEntryType(argv[1]);
     switch (entryType)
@@ -93,6 +94,7 @@ int main(int argc, char* argv[]){
         break;
     }
     default: {
+        fprintf(stderr, "Uknown entry type. Linux supported only.");
         return 1;
         break;
     }

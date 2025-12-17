@@ -109,10 +109,15 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
         stderr = result.stderr.decode(errors='replace')
         tte = os.path.getmtime(crash_file_path)
         if "AddressSanitizer" in stderr:
+            print("Detected")
             parsed_asan = parse_asan(stderr)
+            print(parsed_asan)
             functions = get_source_functions(parsed_asan)
+            print(functions)
             error_type = get_error_type(parsed_asan)
+            print(error_type)
             if functions and error_type:
+                print("EEEEEEEEEEEEEEEEEEEEEEEE")
                 signature = get_stack_signature(functions, error_type)
                 fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
                 return {
@@ -127,11 +132,12 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
         print("Got timeout")
         tte = os.path.getmtime(crash_file_path)
         fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
+        signature = "generic_dos_signature"
         return {
                     'signature': signature,
                     'error_type': 'timeout',
                     'fuzzer_id': fuzzer_id,
-                    'functions': functions,
+                    'functions': "n/a",
                     'tte':int(tte)
                 }
     
@@ -209,6 +215,7 @@ def get_source_functions(parsed_asan: Dict) -> List[Dict[str, Any]]:
     src_frames = parsed_asan["source_frames"]
     functions: List[Dict[str, Any]] = []
     for frame in src_frames:
+        print(frame)
         line = frame.get('line')
         if line is None:
             continue

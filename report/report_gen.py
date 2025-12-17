@@ -1,8 +1,5 @@
-"""Report generation utilities for fuzzing benchmark results."""
-
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from collections import defaultdict
@@ -41,13 +38,21 @@ def _load_json(path: Optional[str]) -> Dict[str, Any]:
 		return {}
 
 
-def _format_fuzzer_name(raw: str) -> str:
+def format_fuzzer_name(raw: str) -> str:
+	def _normalize(value: str) -> str:
+		cleaned = value.lower()
+		for ch in [" ", "&", "-", "\t", "\n", "_"]:
+			cleaned = cleaned.replace(ch, "")
+		cleaned = cleaned.replace("++", "pp")
+		if cleaned.endswith("_out"):
+			cleaned = cleaned[:-4]
+		return cleaned
+
 	mapping: List[Tuple[str, str]] = [
-		("symcc_aflpp", "SYMCC & AFL++"),
-		("afl++", "AFL++"),
-		("aflpp", "AFL++"),
-		("symcc_afl", "SYMCC & AFL"),
+		("symccaflpp", "SYMCC & AFL++"),
+		("symccafl", "SYMCC & AFL"),
 		("symcc", "SYMCC"),
+		("aflpp", "AFL++"),
 		("afl", "AFL"),
 		("hfuzz", "Honggfuzz"),
 		("honggfuzz", "Honggfuzz"),
@@ -55,10 +60,8 @@ def _format_fuzzer_name(raw: str) -> str:
 		("lf", "LibFuzzer"),
 		("klee", "KLEE"),
 	]
-	normalized = raw.lower().replace(" ", "")
-	if normalized.endswith("_out"):
-		normalized = normalized[:-4]
-	normalized = normalized.strip("_")
+
+	normalized = _normalize(raw)
 	for key, label in mapping:
 		if normalized == key:
 			return label
@@ -135,7 +138,7 @@ def _collect_coverage_stats(
 		if not isinstance(values, Iterable):
 			continue
 		fuzzer_name = key.rsplit('_', 1)[0]
-		display = _format_fuzzer_name(fuzzer_name)
+		display = format_fuzzer_name(fuzzer_name)
 		for value in values:
 			try:
 				grouped[display].append(float(value))
@@ -188,17 +191,10 @@ def _render_coverage_table(
 
 
 def _infer_build_type(key: str) -> str:
-	lower = key.lower()
-	if "asan" in lower:
+
+	last_digit = int(key[-1])
+	if (last_digit == 2):
 		return "ASAN"
-	suffix = key.rsplit('_', 1)[-1].lower()
-	if suffix.startswith("fuzz"):
-		digits = "".join(ch for ch in suffix if ch.isdigit())
-		if digits:
-			try:
-				return "ASAN" if int(digits) % 2 == 0 else "Normal"
-			except ValueError:
-				pass
 	return "Normal"
 
 
@@ -206,7 +202,7 @@ def _infer_build_type(key: str) -> str:
 def _collect_bug_details(bug_summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 	details: Dict[str, Dict[str, Any]] = {}
 	for tool_name, tool_data in bug_summary.items():
-		formatted_tool = _format_fuzzer_name(tool_name)
+		formatted_tool = format_fuzzer_name(tool_name)
 		bugs = tool_data.get("bugs") or []
 		for bug in bugs:
 			signature = bug.get("signature") or "unknown"
@@ -224,6 +220,7 @@ def _collect_bug_details(bug_summary: Dict[str, Any]) -> Dict[str, Dict[str, Any
 				"min_tte": bug.get("min_tte"),
 				"mean_tte": bug.get("mean_tte"),
 				"max_tte": bug.get("max_tte"),
+				"found_in": list(bug.get("found_in", [])),
 			}
 			record["per_tool"][tool_name] = entry
 			if formatted_tool != tool_name:
@@ -309,7 +306,22 @@ def _render_bug_details(bug_summary: Dict[str, Any], ordered_tools: Sequence[str
 				metric_rows.append([label, *values])
 
 		add_metric_row("Effectiveness", lambda m: f"{m.get('effectiveness', 0)*100:.1f}%" if m.get("effectiveness") is not None else None)
-		add_metric_row("Finders", lambda m: str(m.get("count")) if m.get("count") is not None else None)
+
+		def _finders_with_breakdown(m: Dict[str, Any]) -> Optional[str]:
+			count = m.get("count")
+			if count is None:
+				return None
+			fuzzers = m.get("found_in") or []
+			if not fuzzers:
+				return str(count)
+			breakdown: Dict[str, int] = defaultdict(int)
+			for fuzzer_id in fuzzers:
+				build = _infer_build_type(fuzzer_id)
+				breakdown[build] += 1
+			parts = [f"{build}={amt}" for build, amt in sorted(breakdown.items())]
+			return f"{count} ({', '.join(parts)})"
+
+		add_metric_row("Finders", _finders_with_breakdown)
 		add_metric_row("Min TTE", lambda m: _format_duration(m.get("min_tte")))
 		add_metric_row("Mean TTE", lambda m: _format_duration(m.get("mean_tte")))
 		add_metric_row("Max TTE", lambda m: str(m.get("max_tte")) if m.get("max_tte") is not None else None)
@@ -380,7 +392,7 @@ def _build_benchmark_table(config: Dict[str, Any]) -> str:
 			print(binaries)
 			jobs = len(binaries) if binaries else "?"
 			print(f"[DEBUG] Jobs={jobs}")
-		job_entries.append(f"{_format_fuzzer_name(name)}={jobs}")
+		job_entries.append(f"{format_fuzzer_name(name)}={jobs}")
 	jobs_value = ", ".join(job_entries) if job_entries else "N/A"
 
 	headers = ["Field", "Value"]
@@ -390,29 +402,37 @@ def _build_benchmark_table(config: Dict[str, Any]) -> str:
 		("Trials", trials),
 		("Dict", dict_present),
 		("Jobs per trial", jobs_value),
+		("CPU", "Ryzen 9 7950X 4.5 GHz 32 Logical Cores"),
+		("Memory", "32 GB"),
+		("Kernel Info", "Linux 6.14.0-37-generic #37~24.04.1-Ubuntu"),
 	]
 	return _render_table(headers, rows, "Benchmark information unavailable.")
 
 
 def _list_fuzzers(config: Dict[str, Any], bug_summary: Dict[str, Any]) -> List[str]:
-	names = []
+	names: List[str] = []
+	seen: set[str] = set()
+
+	def _append(label: str) -> None:
+		if label not in seen:
+			seen.add(label)
+			names.append(label)
+
 	for name in (config.get("fuzzers") or {}).keys():
-		names.append(_format_fuzzer_name(name))
+		_append(format_fuzzer_name(name))
 	for tool in bug_summary.keys():
-		formatted = _format_fuzzer_name(tool)
-		if formatted not in names:
-			names.append(formatted)
+		_append(format_fuzzer_name(tool))
 	return names
 
 
 def _ordered_tools(config: Dict[str, Any], bug_summary: Dict[str, Any]) -> List[str]:
 	ordered = []
 	for name in (config.get("fuzzers") or {}).keys():
-		formatted = _format_fuzzer_name(name)
+		formatted = format_fuzzer_name(name)
 		if formatted not in ordered:
 			ordered.append(formatted)
 	for tool in bug_summary.keys():
-		formatted = _format_fuzzer_name(tool)
+		formatted = format_fuzzer_name(tool)
 		if formatted not in ordered:
 			ordered.append(formatted)
 	print(ordered)
