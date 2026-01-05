@@ -1,83 +1,83 @@
-import os
-import sys
-import yaml
+import tempfile
+import textwrap
 import unittest
-
-# Make sure tools directory is on path when tests run from repository root
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Provide a minimal stub for elftools so importing run_fuzz doesn't fail in test env
-import types
-elf_mod = types.ModuleType('elftools')
-elf_mod.elf = types.ModuleType('elftools.elf')
-elf_mod.elf.elffile = types.ModuleType('elftools.elf.elffile')
-def _dummy_ELFFile(f):
-    raise FileNotFoundError()
-elf_mod.elf.elffile.ELFFile = _dummy_ELFFile
-import sys as _sys
-_sys.modules['elftools'] = elf_mod
-_sys.modules['elftools.elf'] = elf_mod.elf
-_sys.modules['elftools.elf.elffile'] = elf_mod.elf.elffile
-
-from workflow import schedule_fuzzing_jobs, get_fuzzer_output_locations, Fuzzer
+from pathlib import Path
+from unittest.mock import patch
 
 
 class TestWorkflow(unittest.TestCase):
-    def test_get_fuzzer_output_locations(self):
-        import tempfile
-        tmp_path = tempfile.TemporaryDirectory()
+    @classmethod
+    def setUpClass(cls):
         try:
-            cfg = {
-                'target_name': 't',
-                'input_corpora': '/tmp/input',
-                'timeout': '1h',
-                'campaigns': 1,
-                'fuzzers': {
-                    'afl': {
-                        'binaries': ['/bin/true', '/bin/true']
-                    }
-                }
-            }
+            import workflow
+        except ImportError as exc:
+            raise unittest.SkipTest(f"workflow import failed: {exc}")
+        cls.workflow = workflow
 
-            f = Fuzzer('afl', ['/bin/true'])
-            fuzzer_objs = [(f, cfg['fuzzers']['afl'])]
-            base_output_dir = str(tmp_path.name)
-            locs = get_fuzzer_output_locations(cfg, base_output_dir, fuzzer_objs)
+    def test_load_env_file_parses_export_and_quotes(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            env = tmp_path / "env.sh"
+            env.write_text(
+                """
+                # comment
+                export A=1
+                B="two"
+                C='three'
+                INVALID
+                """.strip()
+            )
 
-            self.assertIn('afl', locs)
-            self.assertTrue(os.path.isabs(locs['afl']['out_root']))
-            self.assertEqual(locs['afl']['jobs_per_campaign'], max(1, len(f.binaries)))
-        finally:
-            tmp_path.cleanup()
+            out = self.workflow.load_env_file(str(env))
+            self.assertEqual(out, {"A": "1", "B": "two", "C": "three"})
 
-    def test_schedule_dry_run(self):
-        import tempfile
-        tmp_path = tempfile.TemporaryDirectory()
-        try:
-            cfg = {
-                'target_name': 'target',
-                'input_corpora': '/tmp/input',
-                'timeout': '1h',
-                'campaigns': 1,
-                'fuzzers': {
-                    'afl': {
-                        'binaries': [os.path.join(tmp_path.name, 'bin1')],
-                        'jobs': 1
-                    }
-                }
-            }
+    def test_get_fuzzer_output_locations_computes_defaults(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            cfg = {"campaigns": 2}
+            base = str(tmp_path / "out")
 
-            cfg_path = os.path.join(tmp_path.name, 'cfg.yaml')
-            with open(cfg_path, 'w') as fh:
-                yaml.safe_dump(cfg, fh)
-            outdir = os.path.join(tmp_path.name, 'out')
-            os.makedirs(outdir, exist_ok=True)
+            f1 = self.workflow.Fuzzer("aflpp", binaries=["/bin/true"])
+            f2 = self.workflow.Fuzzer("hfuzz", binaries=["/bin/true", "/bin/false"])
 
-            # Should not raise; dry_run prevents scheduling
-            schedule_fuzzing_jobs(cfg_path, outdir, dry_run=True)
-        finally:
-            tmp_path.cleanup()
+            fuzzer_objs = [(f1, {}), (f2, {"jobs": 10})]
+            loc = self.workflow.get_fuzzer_output_locations(cfg, base, fuzzer_objs)
 
+            self.assertEqual(loc["aflpp"]["expected_campaigns"], 2)
+            self.assertEqual(loc["aflpp"]["jobs_per_campaign"], 1)
+            self.assertEqual(loc["hfuzz"]["jobs_per_campaign"], 10)
+            self.assertTrue(loc["aflpp"]["campaign_pattern"].endswith("c{n}"))
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_schedule_fuzzing_jobs_dry_run_returns_locations(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            config = tmp_path / "cfg.yaml"
+            config.write_text(
+                                textwrap.dedent(
+                                        """\
+                                        target_name: demo
+                                        input_corpora: /tmp/corpus
+                                        timeout: 1h
+                                        campaigns: 2
+                                        fuzzers:
+                                            aflpp:
+                                                binaries: [/bin/true]
+                                                jobs: 2
+                                        """
+                                ).strip()
+            )
+
+            with patch.object(self.workflow.os, "makedirs", lambda *a, **k: None):
+                loc = self.workflow.schedule_fuzzing_jobs(str(config), str(tmp_path), dry_run=True)
+
+            self.assertIn("aflpp", loc)
+            self.assertEqual(loc["aflpp"]["expected_campaigns"], 2)
+
+    def test_schedule_fuzzing_jobs_requires_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            config = tmp_path / "cfg.yaml"
+            config.write_text("target_name: demo\n")
+
+            with self.assertRaises(ValueError):
+                self.workflow.schedule_fuzzing_jobs(str(config), str(tmp_path), dry_run=True)

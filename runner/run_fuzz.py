@@ -75,7 +75,6 @@ def launch_afl(core_id, input_dir, output_dir, target, timeout, session_name, di
         f"{afl_bin} -i \"{input_dir}\" -o \"{output_dir}\" {afl_mode} {dict_cmd} -m none "
         f"-- \"{target}\"'"
     )
-    print(cmd)
     print(f"[+] Launching {session_name} on core {core_id} -> {target}")
     subprocess.run(cmd, shell=True, check=False,env=env)
 

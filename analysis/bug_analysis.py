@@ -53,7 +53,7 @@ def _extract_fuzzer_id(crash_file_path: str, fuzz_dir: str) -> str:
     rel = os.path.relpath(os.path.dirname(crash_file_path), fuzz_dir)
     parts = rel.split(os.sep)
     for i, p in enumerate(parts):
-        if p.startswith('c'):
+        if p.startswith('c') and p[1:].isdigit():
             if i + 1 < len(parts) and parts[i + 1].startswith('fuzz'):
                 return f"{p}/{parts[i+1]}"
             return p
@@ -109,15 +109,10 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
         stderr = result.stderr.decode(errors='replace')
         tte = os.path.getmtime(crash_file_path)
         if "AddressSanitizer" in stderr:
-            print("Detected")
             parsed_asan = parse_asan(stderr)
-            print(parsed_asan)
             functions = get_source_functions(parsed_asan)
-            print(functions)
             error_type = get_error_type(parsed_asan)
-            print(error_type)
             if functions and error_type:
-                print("EEEEEEEEEEEEEEEEEEEEEEEE")
                 signature = get_stack_signature(functions, error_type)
                 fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
                 return {
@@ -129,7 +124,6 @@ def _analyze_crash(crash_file_path: str, fuzz_dir: str, tool_name: str, asan_bin
                 }
             
     except (subprocess.TimeoutExpired) as e:
-        print("Got timeout")
         tte = os.path.getmtime(crash_file_path)
         fuzzer_id = _extract_fuzzer_id(crash_file_path, fuzz_dir)
         signature = "generic_dos_signature"
@@ -193,7 +187,6 @@ def get_unique_bugs(asan_binary_path: str, fuzzing_output_dirs: List[str], llvm_
 
     for fuzz_dir in fuzzing_output_dirs:
         tool_name = format_fuzzer_name(fuzz_dir)
-        print(f"[*][BUG] Testing: {tool_name}")
         start_time_val = _get_start_time_universal(fuzz_dir)
         start_time = int(start_time_val) if start_time_val is not None else 0
         tool_buckets.setdefault(tool_name, BugBucket(start_time=start_time))

@@ -76,4 +76,5 @@ def main(out, binary, interval, llvm_instr, is_libfuzzer):
         print(f"[!][{datetime.datetime.now()}] Interrupted by user. Exiting.")
 
 
-main()
+if __name__ == "__main__":
+    main()

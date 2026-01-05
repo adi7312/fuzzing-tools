@@ -389,9 +389,7 @@ def _build_benchmark_table(config: Dict[str, Any]) -> str:
 		jobs = details.get("jobs")
 		if jobs is None:
 			binaries = details.get("binaries") or []
-			print(binaries)
 			jobs = len(binaries) if binaries else "?"
-			print(f"[DEBUG] Jobs={jobs}")
 		job_entries.append(f"{format_fuzzer_name(name)}={jobs}")
 	jobs_value = ", ".join(job_entries) if job_entries else "N/A"
 

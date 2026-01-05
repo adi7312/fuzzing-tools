@@ -18,14 +18,10 @@ def format_fuzzer_name(dir_name):
         tmp = list(dir_name)
         tmp[-1] = ''
         dir_name = ''.join(list(tmp))
-    print(f"Trying to converse: {dir_name}")
     name_map = {"symcc_aflpp": "SYMCC & AFL++", "aflpp": "AFL++",  "symcc": "SYMCC", "afl": "AFL", "hfuzz": "Honggfuzz", "libfuzzer": "LibFuzzer", "lf": "LibFuzzer"}
     base_name = os.path.basename(dir_name)
-    print(f"Base name: {base_name}")
-    print(base_name)
     for key, formatted_name in name_map.items():
         if key in base_name.lower():
-            print(f"Formatted: {formatted_name}")
             return formatted_name
     
     return base_name.replace('_out', '').replace('_', ' ').title()

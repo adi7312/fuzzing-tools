@@ -34,7 +34,6 @@ def get_coverage(binary_path, corpus_dir, max_retries: int = 2, base_timeout: in
 
             run_cmd = (binary_path, corpus_dir)
             try:
-                print(f"[ANALYSIS][COVERAGE] Running: {run_cmd[0]} {run_cmd[1]}")
                 subprocess.run(
                     run_cmd,
                     env=env,
@@ -64,7 +63,6 @@ def get_coverage(binary_path, corpus_dir, max_retries: int = 2, base_timeout: in
                 cov_data = json.loads(result.stdout)
                 branches_summary = cov_data['data'][0]['totals']['branches']
                 covered = branches_summary.get('covered', 0)
-                print(f"[DEBUG][ANALYSIS] Collected branches: {covered}")
                 if covered == 0:
                     return 0, "llvm-cov reported 0 covered branches"
                 return covered, None
@@ -121,13 +119,11 @@ def copy_files_parallel(files, dest_dir):
 
 def analyze_coverage_growth_in_time(binary_path, fuzzer_out_dir, time_limit):
     print(f"[*] Analyzing coverage growth for {fuzzer_out_dir}...")
-    print(f"d1: {fuzzer_out_dir}")
     if(fuzzer_out_dir[-1] == '/'):
         tmp = list(fuzzer_out_dir)
         tmp[-1] = ''
         fuzzer_out_dir = ''.join(list(tmp))
     fuzzer_name = format_fuzzer_name(fuzzer_out_dir)
-    print(f"Fuzzer name: {fuzzer_name}")
     campaign_results = defaultdict(list)
 
     def _resolve_corpus_path(fuzzer_instance_path: str) -> str | None:
@@ -209,7 +205,6 @@ def analyze_fuzzer_dir(binary_path, fuzzer_out_dir):
     The fuzzer name is inferred from the directory name.
     """
     coverage_data = {}
-    print(f"d1: {fuzzer_out_dir}")
     if(fuzzer_out_dir[-1] == '/'):
         tmp = list(fuzzer_out_dir)
         tmp[-1] = ''
